@@ -1,0 +1,5 @@
+{
+  "warmup": 1024,
+  "charge": false,
+  "speculations": 0
+}

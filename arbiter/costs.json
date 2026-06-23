@@ -1,0 +1,80 @@
+{
+  "saturating_add": {
+    "switching_energy": 0.048738,
+    "leakage_energy": 0.007299295,
+    "area_space": 20.0192,
+    "work_time": 0.449180
+  },
+  "saturating_sub": {
+    "switching_energy": 0.048738,
+    "leakage_energy": 0.007299295,
+    "area_space": 20.0192,
+    "work_time": 0.449180
+  },
+  "wrapping_shl": {
+    "switching_energy": 0.065897,
+    "leakage_energy": 0.004027789,
+    "area_space": 11.2608,
+    "work_time": 0.384141
+  },
+  "wrapping_shr": {
+    "switching_energy": 0.065897,
+    "leakage_energy": 0.004027789,
+    "area_space": 11.2608,
+    "work_time": 0.384141
+  },
+  "bitor": {
+    "switching_energy": 0.029673,
+    "leakage_energy": 0.003277774,
+    "area_space": 7.7584,
+    "work_time": 0.304923
+  },
+  "bitand": {
+    "switching_energy": 0.061258,
+    "leakage_energy": 0.002665008,
+    "area_space": 6.2560,
+    "work_time": 0.327489
+  },
+  "bitxor": {
+    "switching_energy": 0.039673,
+    "leakage_energy": 0.004277774,
+    "area_space": 8.7584,
+    "work_time": 0.307923
+  },
+  "memory_read": {
+    "switching_energy": 0.067036,
+    "leakage_energy": 0.008438635,
+    "area_space": 20.0192,
+    "work_time": 0.399792
+  },
+  "memory_write": {
+    "switching_energy": 0.067036,
+    "leakage_energy": 0.008438635,
+    "area_space": 20.0192,
+    "work_time": 0.399792
+  },
+  "register_read": {
+    "switching_energy": 0.006703,
+    "leakage_energy": 0.000843863,
+    "area_space": 2.0192,
+    "work_time": 0.0399792
+  },
+  "register_write": {
+    "switching_energy": 0.006703,
+    "leakage_energy": 0.000843863,
+    "area_space": 2.0192,
+    "work_time": 0.0399792
+  },
+  "select": {
+    "switching_energy": 0.065897,
+    "leakage_energy": 0.004027789,
+    "area_space": 11.2608,
+    "work_time": 0.384141
+  },
+  "resize": {
+    "switching_energy": 0.0,
+    "leakage_energy": 0.0,
+    "area_space": 0.0,
+    "work_time": 0.0
+  }
+}
