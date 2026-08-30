@@ -12,20 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ramus::{Address, Outcome, Predictor, Register, select};
+use crate::predictors::Address;
+use ramus::{Outcome, Predictor, Register, select};
 
 #[derive(Default)]
 pub struct GlobalFlag {
     flag: Register<1>,
 }
 
-impl Predictor for GlobalFlag {
-    fn predict(&mut self, _: Address) -> Outcome {
+impl Predictor<64> for GlobalFlag {
+    fn predict(&mut self, _current: Address) -> Outcome {
         let prediction = *self.flag == 1u8;
         Outcome::from(prediction)
     }
 
-    fn update(&mut self, _: Address, outcome: Outcome, _: Address) {
+    fn update(&mut self, _current: Address, outcome: Outcome, _next: Address) {
         *self.flag = select!(outcome => {
             Outcome::Taken => self.flag.saturating_add(1u8),
             Outcome::Untaken => self.flag.saturating_sub(1u8)

@@ -12,13 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ramus::{Address, Outcome, Predictor};
+use crate::predictors::Address;
+use ramus::{Outcome, Predictor};
 
 #[derive(Default)]
 pub struct AlwaysTaken {}
 
-impl Predictor for AlwaysTaken {
-    fn predict(&mut self, _: Address) -> Outcome {
+impl Predictor<64> for AlwaysTaken {
+    fn predict(&mut self, _current: Address) -> Outcome {
         Outcome::Taken
     }
 

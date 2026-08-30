@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ramus::{Address, Array, Outcome, Predictor, Register, select};
+use crate::predictors::Address;
+use ramus::{Array, Outcome, Predictor, Register, select};
 
 #[derive(Default)]
 pub struct GlobalShare {
@@ -26,15 +27,15 @@ impl GlobalShare {
     const TABLE_LENGTH: usize = 1 << Self::REGISTER_BITS;
 }
 
-impl Predictor for GlobalShare {
-    fn predict(&mut self, _: Address) -> Outcome {
+impl Predictor<64> for GlobalShare {
+    fn predict(&mut self, _current: Address) -> Outcome {
         let index = *self.register;
         let counter = self.table[index];
         let prediction = (counter >> 1u8) == 1u8;
         Outcome::from(prediction)
     }
 
-    fn update(&mut self, _: Address, outcome: Outcome, _: Address) {
+    fn update(&mut self, _current: Address, outcome: Outcome, _next: Address) {
         let index = *self.register;
         let counter = self.table[index];
         self.table[index] = select!(outcome => {

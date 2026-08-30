@@ -36,12 +36,12 @@ docs:
 alias cov := coverage
 # Coverage report (format: html|lcov|json|...)
 coverage format="html":
-    cargo llvm-cov --{{format}}
-    cargo llvm-cov report --show-missing-lines
+    cargo llvm-cov --all-features --{{format}}
+    cargo llvm-cov --all-features report --show-missing-lines
 
 # Lint source code with Clippy
 lint:
-    cargo clippy --all
+    cargo clippy --all-targets --all-features
 
 # Audit dependencies for known vulnerabilities
 audit:
@@ -50,7 +50,7 @@ audit:
 alias clear := clean
 # Remove build artifacts
 clean:
-    cargo clean
+    cargo clean --workspace
 
 # Run all pre-push checks (audit, lint, coverage)
 push: audit lint coverage

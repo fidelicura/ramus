@@ -95,7 +95,7 @@ impl Bimodal {
     const MASK: u32 = Self::LENGTH as u32 - 1;
 
     // Map a branch address to its bucket index.
-    fn index(address: Address) -> Value<64> {
+    fn index(address: Address<64>) -> Value<64> {
         // Instructions are 4-byte aligned, so the low 2 bits are always zero
         // and carry no information. Drop them first so neighbouring branches
         // don't all collide into the same bucket.
@@ -111,9 +111,9 @@ impl Bimodal {
 
 // A predictor is just these two methods (there's also an optional `track` for
 // history-based designs; the default no-op is fine for bimodal).
-impl Predictor for Bimodal {
+impl Predictor<64> for Bimodal {
     // This trait method is called once per conditional branch, before we learn the real outcome.
-    fn predict(&mut self, current: Address) -> Outcome {
+    fn predict(&mut self, current: Address<64>) -> Outcome {
         let index = Self::index(current);
         let counter = self.table[index]; // Indexing is also metered.
 
@@ -124,7 +124,7 @@ impl Predictor for Bimodal {
 
     // Called right after, with the branch's true `outcome` (`next` is the
     // resulting PC, handy for history-based predictors - unused here).
-    fn update(&mut self, current: Address, outcome: Outcome, _next: Address) {
+    fn update(&mut self, current: Address<64>, outcome: Outcome, _next: Address<64>) {
         let index = Self::index(current);
         let counter = self.table[index]; // Indexing is also metered.
 
@@ -161,10 +161,10 @@ use ramus::{Info, Kind, Source};
 use std::collections::VecDeque;
 
 // Hands out pre-built records front-to-back, then `None` once drained.
-struct Trace(VecDeque<Info>);
+struct Trace(VecDeque<Info<64>>);
 
-impl Source for Trace {
-    fn fetch(&mut self) -> Option<Info> {
+impl Source<64> for Trace {
+    fn fetch(&mut self) -> Option<Info<64>> {
         self.0.pop_front()
     }
 }
@@ -173,7 +173,7 @@ impl Trace {
     // A tiny imaginary trace: two conditional branches, one mostly taken
     // and one mostly not, so the counters have something to learn from.
     fn example() -> Self {
-        let branch = |address: u64, outcome: Outcome, next: u64| Info {
+        let branch = |address: u64, outcome: Outcome, next: u64| Info::<64> {
             address: Value::wrapping(address), // Branch instruction PC.
             outcome,
             kind: Kind::Conditional,

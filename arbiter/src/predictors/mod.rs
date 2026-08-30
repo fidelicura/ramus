@@ -14,6 +14,9 @@
 
 use ramus::Predictor;
 
+/// Arbiter traces carry 64-bit addresses; every predictor here is 64-bit.
+pub type Address = ramus::Address<64>;
+
 /// Registers each predictor module and builds [`ALL`] - predictors registry.
 ///
 /// Each entry pairs a name with a builder that boxes a fresh predictor,
@@ -22,7 +25,7 @@ macro_rules! predictors {
     ($($name:literal => $module:ident :: $ty:ident),+ $(,)?) => {
         $( mod $module; )+
 
-        pub const ALL: &[(&str, fn() -> Box<dyn Predictor + Send>)] = &[
+        pub const ALL: &[(&str, fn() -> Box<dyn Predictor<64> + Send>)] = &[
             $( ($name, || Box::new($module::$ty::default())) ),+
         ];
     };

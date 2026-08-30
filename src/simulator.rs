@@ -15,25 +15,26 @@
 use crate::common::{Address, Info, Kind, Outcome};
 use crate::observability::{Costs, Metrics};
 use std::collections::VecDeque;
+#[cfg(feature = "parallel")]
 use std::thread;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // Predictor {{
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-/// A branch predictor under evaluation.
-pub trait Predictor: 'static {
+/// A branch predictor under evaluation, over `BITS`-wide addresses.
+pub trait Predictor<const BITS: usize>: 'static {
     /// Predict whether the conditional branch at `current` address is taken.
     ///
     /// Called only for conditional branches before [`Self::update`].
-    fn predict(&mut self, current: Address) -> Outcome;
+    fn predict(&mut self, current: Address<BITS>) -> Outcome;
 
     /// Update internal state with a scored conditional branch's actual `outcome`.
     ///
     /// `next` is the next address (target if taken, fall-through otherwise)
     /// for history. Called only for conditional branches after [`Self::predict`].
     #[allow(unused_variables)]
-    fn update(&mut self, current: Address, outcome: Outcome, next: Address) {}
+    fn update(&mut self, current: Address<BITS>, outcome: Outcome, next: Address<BITS>) {}
 
     /// Observe a non-conditional branch for history.
     ///
@@ -41,7 +42,8 @@ pub trait Predictor: 'static {
     /// into global/path history. Never called for conditional branches; do not
     /// train scored tables here.
     #[allow(unused_variables)]
-    fn track(&mut self, current: Address, kind: Kind, outcome: Outcome, next: Address) {}
+    fn track(&mut self, current: Address<BITS>, kind: Kind, outcome: Outcome, next: Address<BITS>) {
+    }
 
     /// Static area of this predictor's state (its tables, counters, history).
     ///
@@ -51,19 +53,20 @@ pub trait Predictor: 'static {
     fn size(&self) -> f64;
 }
 
-/// Forwards to the boxed predictor, so a `Box<dyn Predictor>` is itself a
-/// `Predictor`. This is what lets [`Simulator::run_many_predictors`] hold a
-/// heterogeneous `Vec` of differently-typed predictors behind trait objects.
-impl<P: Predictor + ?Sized> Predictor for Box<P> {
-    fn predict(&mut self, current: Address) -> Outcome {
+/// Forwards to the boxed predictor, so a `Box<dyn Predictor>` is itself a `Predictor`.
+///
+/// This is what lets [`Simulator::run_many_predictors`] hold a heterogeneous
+/// `Vec` of differently-typed predictors behind trait objects.
+impl<const BITS: usize, P: Predictor<BITS> + ?Sized> Predictor<BITS> for Box<P> {
+    fn predict(&mut self, current: Address<BITS>) -> Outcome {
         (**self).predict(current)
     }
 
-    fn update(&mut self, current: Address, outcome: Outcome, next: Address) {
+    fn update(&mut self, current: Address<BITS>, outcome: Outcome, next: Address<BITS>) {
         (**self).update(current, outcome, next)
     }
 
-    fn track(&mut self, current: Address, kind: Kind, outcome: Outcome, next: Address) {
+    fn track(&mut self, current: Address<BITS>, kind: Kind, outcome: Outcome, next: Address<BITS>) {
         (**self).track(current, kind, outcome, next)
     }
 
@@ -130,16 +133,17 @@ impl Config {
 // Queue {{
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-/// Bounded holding pen of predicted-but-unresolved conditionals, oldest
-/// first. `capacity` is fixed at construction; since exactly one [`Info`] is
+/// Bounded holding pen of predicted-but-unresolved conditionals, oldest first.
+///
+/// `capacity` is fixed at construction; since exactly one [`Info`] is
 /// pushed at a time, [`Queue::push`] can only ever push the queue one over
 /// capacity, so it resolves at most one entry per call - never a loop.
-struct Queue {
+struct Queue<const BITS: usize> {
     capacity: usize,
-    items: VecDeque<Info>,
+    items: VecDeque<Info<BITS>>,
 }
 
-impl Queue {
+impl<const BITS: usize> Queue<BITS> {
     /// A queue that holds up to `capacity` unresolved conditionals at once.
     fn new(capacity: usize) -> Self {
         Self {
@@ -148,9 +152,11 @@ impl Queue {
         }
     }
 
-    /// Queue `info`. If that pushed the queue over capacity, returns the
-    /// oldest entry - now ready to resolve via [`Predictor::update`].
-    fn push(&mut self, info: Info) -> Option<Info> {
+    /// Queue `info`.
+    ///
+    /// If that pushed the queue over capacity, returns the oldest
+    /// entry - now ready to resolve via [`Predictor::update`].
+    fn push(&mut self, info: Info<BITS>) -> Option<Info<BITS>> {
         self.items.push_back(info);
 
         if self.items.len() > self.capacity {
@@ -161,19 +167,20 @@ impl Queue {
     }
 
     /// Pop the oldest still-queued entry, if any.
-    fn pop(&mut self) -> Option<Info> {
+    fn pop(&mut self) -> Option<Info<BITS>> {
         self.items.pop_front()
     }
 
-    /// Feed one record to `predictor`, ticking one cycle of leakage:
-    /// conditionals are predicted and scored (if `score`) immediately -
+    /// Feed one record to `predictor`, ticking one cycle of leakage.
+    ///
+    /// Conditionals are predicted and scored (if `score`) immediately -
     /// ground truth is already known from the trace - then queued via
     /// [`Self::push`]; [`Predictor::update`] fires only for whatever entry
     /// that push resolves. Everything else only updates history via
     /// [`Predictor::track`], immediately.
-    fn feed<P>(&mut self, predictor: &mut P, info: Info, score: bool)
+    fn feed<P>(&mut self, predictor: &mut P, info: Info<BITS>, score: bool)
     where
-        P: Predictor,
+        P: Predictor<BITS>,
     {
         if info.kind == Kind::Conditional {
             // 1. Predict now; this is the only signal a real predictor gets
@@ -202,7 +209,7 @@ impl Queue {
     /// Resolve every conditional still queued, oldest first, via [`Predictor::update`].
     fn drain<P>(&mut self, predictor: &mut P)
     where
-        P: Predictor,
+        P: Predictor<BITS>,
     {
         while let Some(resolved) = self.pop() {
             predictor.update(resolved.address, resolved.outcome, resolved.next);
@@ -231,10 +238,15 @@ pub struct Simulator;
 impl Simulator {
     /// Drive `predictor` over the whole `source` trace under `costs` and
     /// `config`, returning the run's [`Metrics`].
-    pub fn run_one<S, P>(mut source: S, mut predictor: P, costs: Costs, config: Config) -> Metrics
+    pub fn run_one<const BITS: usize, S, P>(
+        mut source: S,
+        mut predictor: P,
+        costs: Costs,
+        config: Config,
+    ) -> Metrics
     where
-        S: Source,
-        P: Predictor,
+        S: Source<BITS>,
+        P: Predictor<BITS>,
     {
         // 1. Install this run's cost table and charge the predictor's static
         // storage once, up front - it exists for the whole run regardless of
@@ -285,14 +297,14 @@ impl Simulator {
     ///
     /// With the `parallel` feature the runs are spread across threads.
     #[cfg(not(feature = "parallel"))]
-    pub fn run_many_predictors<S>(
+    pub fn run_many_predictors<const BITS: usize, S>(
         source: S,
-        predictors: Vec<Box<dyn Predictor>>,
+        predictors: Vec<Box<dyn Predictor<BITS>>>,
         costs: Costs,
         config: Config,
     ) -> Vec<Metrics>
     where
-        S: Source + Clone,
+        S: Source<BITS> + Clone,
     {
         predictors
             .into_iter()
@@ -305,14 +317,14 @@ impl Simulator {
     ///
     /// With the `parallel` feature the runs are spread across threads.
     #[cfg(feature = "parallel")]
-    pub fn run_many_predictors<S>(
+    pub fn run_many_predictors<const BITS: usize, S>(
         source: S,
-        predictors: Vec<Box<dyn Predictor + Send>>,
+        predictors: Vec<Box<dyn Predictor<BITS> + Send>>,
         costs: Costs,
         config: Config,
     ) -> Vec<Metrics>
     where
-        S: Source + Clone + Send,
+        S: Source<BITS> + Clone + Send,
     {
         thread::scope(|scope| {
             predictors
@@ -328,20 +340,21 @@ impl Simulator {
         })
     }
 
-    /// Run a clone of `predictor` over each source under `costs`, returning one
-    /// [`Metrics`] per source in the same order. Each source trains its own
-    /// fresh copy of the predictor.
+    /// Run a clone of `predictor` over each source under `costs`, returning
+    /// one [`Metrics`] per source in the same order.
+    ///
+    /// Each source trains its own fresh copy of the predictor.
     ///
     /// With the `parallel` feature the runs are spread across threads.
     #[cfg(not(feature = "parallel"))]
-    pub fn run_many_sources<P>(
-        sources: Vec<Box<dyn Source>>,
+    pub fn run_many_sources<const BITS: usize, P>(
+        sources: Vec<Box<dyn Source<BITS>>>,
         predictor: P,
         costs: Costs,
         config: Config,
     ) -> Vec<Metrics>
     where
-        P: Predictor + Clone,
+        P: Predictor<BITS> + Clone,
     {
         sources
             .into_iter()
@@ -349,20 +362,21 @@ impl Simulator {
             .collect()
     }
 
-    /// Run a clone of `predictor` over each source under `costs`, returning one
-    /// [`Metrics`] per source in the same order. Each source trains its own
-    /// fresh copy of the predictor.
+    /// Run a clone of `predictor` over each source under `costs`, returning
+    /// one [`Metrics`] per source in the same order.
+    ///
+    /// Each source trains its own fresh copy of the predictor.
     ///
     /// With the `parallel` feature the runs are spread across threads.
     #[cfg(feature = "parallel")]
-    pub fn run_many_sources<P>(
-        sources: Vec<Box<dyn Source + Send>>,
+    pub fn run_many_sources<const BITS: usize, P>(
+        sources: Vec<Box<dyn Source<BITS> + Send>>,
         predictor: P,
         costs: Costs,
         config: Config,
     ) -> Vec<Metrics>
     where
-        P: Predictor + Clone + Send,
+        P: Predictor<BITS> + Clone + Send,
     {
         thread::scope(|scope| {
             sources
@@ -390,16 +404,17 @@ impl Simulator {
 /// A trace of branch records.
 ///
 /// Implement this to feed any trace format.
-pub trait Source: 'static {
+pub trait Source<const BITS: usize>: 'static {
     /// Yield the next **branch**, or `None` once the trace is exhausted.
-    fn fetch(&mut self) -> Option<Info>;
+    fn fetch(&mut self) -> Option<Info<BITS>>;
 }
 
 /// Forwards to the boxed source, so a `Box<dyn Source>` is itself a `Source`.
-/// This lets [`Simulator::run_many_sources`] hold a heterogeneous `Vec` of
-/// differently-typed traces behind trait objects.
-impl<S: Source + ?Sized> Source for Box<S> {
-    fn fetch(&mut self) -> Option<Info> {
+///
+/// This lets [`Simulator::run_many_sources`] hold a heterogeneous
+/// `Vec` of differently-typed traces behind trait objects.
+impl<const BITS: usize, S: Source<BITS> + ?Sized> Source<BITS> for Box<S> {
+    fn fetch(&mut self) -> Option<Info<BITS>> {
         (**self).fetch()
     }
 }
@@ -416,8 +431,8 @@ mod tests {
     use std::rc::Rc;
 
     /// Trace backed by a queue, drained front to back.
-    impl Source for VecDeque<Info> {
-        fn fetch(&mut self) -> Option<Info> {
+    impl<const BITS: usize> Source<BITS> for VecDeque<Info<BITS>> {
+        fn fetch(&mut self) -> Option<Info<BITS>> {
             self.pop_front()
         }
     }
@@ -426,8 +441,8 @@ mod tests {
     #[derive(Clone)]
     struct AlwaysTaken;
 
-    impl Predictor for AlwaysTaken {
-        fn predict(&mut self, _current: Address) -> Outcome {
+    impl Predictor<64> for AlwaysTaken {
+        fn predict(&mut self, _current: Address<64>) -> Outcome {
             Outcome::Taken
         }
 
@@ -440,8 +455,8 @@ mod tests {
     #[derive(Clone)]
     struct Stateful<const AREA: usize>;
 
-    impl<const AREA: usize> Predictor for Stateful<AREA> {
-        fn predict(&mut self, _current: Address) -> Outcome {
+    impl<const AREA: usize> Predictor<64> for Stateful<AREA> {
+        fn predict(&mut self, _current: Address<64>) -> Outcome {
             Outcome::Taken
         }
 
@@ -455,8 +470,8 @@ mod tests {
     #[derive(Clone)]
     struct OneAdd;
 
-    impl Predictor for OneAdd {
-        fn predict(&mut self, _current: Address) -> Outcome {
+    impl Predictor<64> for OneAdd {
+        fn predict(&mut self, _current: Address<64>) -> Outcome {
             let _ = crate::Value::<8>::ZERO.wrapping_add(1u8);
             Outcome::Taken
         }
@@ -466,7 +481,7 @@ mod tests {
         }
     }
 
-    fn branch(kind: Kind, outcome: Outcome) -> Info {
+    fn branch(kind: Kind, outcome: Outcome) -> Info<64> {
         Info {
             address: Address::ZERO,
             outcome,
@@ -608,12 +623,12 @@ mod tests {
         ]);
         #[cfg(not(feature = "parallel"))]
         let predictors = vec![
-            Box::new(AlwaysTaken) as Box<dyn Predictor>,
+            Box::new(AlwaysTaken) as Box<dyn Predictor<64>>,
             Box::new(AlwaysTaken),
         ];
         #[cfg(feature = "parallel")]
         let predictors = vec![
-            Box::new(AlwaysTaken) as Box<dyn Predictor + Send>,
+            Box::new(AlwaysTaken) as Box<dyn Predictor<64> + Send>,
             Box::new(AlwaysTaken),
         ];
         let costs = Costs::default();
@@ -635,13 +650,13 @@ mod tests {
         };
         #[cfg(not(feature = "parallel"))]
         let sources = vec![
-            Box::new(source()) as Box<dyn Source>,
+            Box::new(source()) as Box<dyn Source<64>>,
             Box::new(source()),
             Box::new(source()),
         ];
         #[cfg(feature = "parallel")]
         let sources = vec![
-            Box::new(source()) as Box<dyn Source + Send>,
+            Box::new(source()) as Box<dyn Source<64> + Send>,
             Box::new(source()),
             Box::new(source()),
         ];
@@ -660,8 +675,8 @@ mod tests {
     #[should_panic(expected = "predictor thread panicked")]
     fn run_many_predictors_propagates_a_panicking_predictor() {
         struct Panics;
-        impl Predictor for Panics {
-            fn predict(&mut self, _current: Address) -> Outcome {
+        impl Predictor<64> for Panics {
+            fn predict(&mut self, _current: Address<64>) -> Outcome {
                 panic!("boom");
             }
 
@@ -671,7 +686,7 @@ mod tests {
         }
 
         let source = VecDeque::from([branch(Kind::Conditional, Outcome::Taken)]);
-        let predictors: Vec<Box<dyn Predictor + Send>> = vec![Box::new(Panics)];
+        let predictors: Vec<Box<dyn Predictor<64> + Send>> = vec![Box::new(Panics)];
 
         let _ =
             Simulator::run_many_predictors(source, predictors, Costs::default(), Config::none());
@@ -682,13 +697,13 @@ mod tests {
     #[should_panic(expected = "source thread panicked")]
     fn run_many_sources_propagates_a_panicking_source() {
         struct Panics;
-        impl Source for Panics {
-            fn fetch(&mut self) -> Option<Info> {
+        impl Source<64> for Panics {
+            fn fetch(&mut self) -> Option<Info<64>> {
                 panic!("boom");
             }
         }
 
-        let sources: Vec<Box<dyn Source + Send>> = vec![Box::new(Panics)];
+        let sources: Vec<Box<dyn Source<64> + Send>> = vec![Box::new(Panics)];
 
         let _ = Simulator::run_many_sources(sources, AlwaysTaken, Costs::default(), Config::none());
     }
@@ -700,12 +715,12 @@ mod tests {
     #[derive(Clone)]
     struct LastOutcome(Outcome);
 
-    impl Predictor for LastOutcome {
-        fn predict(&mut self, _current: Address) -> Outcome {
+    impl Predictor<64> for LastOutcome {
+        fn predict(&mut self, _current: Address<64>) -> Outcome {
             self.0
         }
 
-        fn update(&mut self, _current: Address, outcome: Outcome, _next: Address) {
+        fn update(&mut self, _current: Address<64>, outcome: Outcome, _next: Address<64>) {
             self.0 = outcome;
         }
 
@@ -761,12 +776,12 @@ mod tests {
     #[derive(Clone)]
     struct ChargeOnUpdate;
 
-    impl Predictor for ChargeOnUpdate {
-        fn predict(&mut self, _current: Address) -> Outcome {
+    impl Predictor<64> for ChargeOnUpdate {
+        fn predict(&mut self, _current: Address<64>) -> Outcome {
             Outcome::Taken
         }
 
-        fn update(&mut self, _current: Address, _outcome: Outcome, _next: Address) {
+        fn update(&mut self, _current: Address<64>, _outcome: Outcome, _next: Address<64>) {
             let _ = crate::Value::<8>::ZERO.wrapping_add(1u8);
         }
 
@@ -805,13 +820,13 @@ mod tests {
     #[derive(Clone)]
     struct Logger(Rc<RefCell<Vec<&'static str>>>);
 
-    impl Predictor for Logger {
-        fn predict(&mut self, _current: Address) -> Outcome {
+    impl Predictor<64> for Logger {
+        fn predict(&mut self, _current: Address<64>) -> Outcome {
             self.0.borrow_mut().push("predict");
             Outcome::Taken
         }
 
-        fn update(&mut self, _current: Address, _outcome: Outcome, _next: Address) {
+        fn update(&mut self, _current: Address<64>, _outcome: Outcome, _next: Address<64>) {
             self.0.borrow_mut().push("update");
         }
 

@@ -26,7 +26,7 @@ use std::sync::Arc;
 /// A CBP-NG 2026 gzipped instruction trace, decoded into memory.
 #[derive(Clone)]
 pub struct Trace {
-    records: Arc<[Info]>,
+    records: Arc<[Info<64>]>,
     cursor: usize,
 }
 
@@ -59,8 +59,8 @@ impl Trace {
     }
 }
 
-impl Source for Trace {
-    fn fetch(&mut self) -> Option<Info> {
+impl Source<64> for Trace {
+    fn fetch(&mut self) -> Option<Info<64>> {
         let info = self.records.get(self.cursor).copied()?;
         self.cursor += 1;
         Some(info)
@@ -128,7 +128,7 @@ impl Reader {
         Some(())
     }
 
-    fn next(&mut self) -> Option<Info> {
+    fn next(&mut self) -> Option<Info<64>> {
         loop {
             let address = self.read_word()?;
             let class = self.read_byte()?;

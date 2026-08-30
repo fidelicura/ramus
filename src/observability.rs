@@ -21,15 +21,19 @@ use std::collections::HashSet;
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 thread_local! {
-    /// Per-thread run state that [`Value`](crate::value::Value) operations and predictors
-    /// write into without threading a context argument through every call. Thread-locality
-    /// keeps concurrent simulation runs - including parallel tests - isolated.
+    /// Per-thread run state that [`Value`](crate::Value) operations and
+    /// predictors write into without threading a context argument through every call.
+    ///
+    /// Thread-locality keeps concurrent simulation runs - including parallel
+    /// tests - isolated.
     static LEDGER: RefCell<Ledger> = RefCell::new(Ledger::new());
 }
 
-/// Everything one simulation run accumulates: the public [`Metrics`] totals plus the
-/// bookkeeping needed to compute them, held in one cell so [`Metrics::reset`] clears
-/// all of it in a single step instead of juggling several thread-locals in lockstep.
+/// Everything one simulation run accumulates.
+///
+/// The public [`Metrics`] totals plus the bookkeeping needed to compute them,
+/// held in one cell so [`Metrics::reset`] clears all of it in a single step
+/// instead of juggling several thread-locals in lockstep.
 #[derive(Debug, Clone, Default)]
 struct Ledger {
     metrics: Metrics,
@@ -40,12 +44,16 @@ struct Ledger {
     /// `wrapping_add::<8>` and a `wrapping_add::<64>`, or a 2-way and an 8-way
     /// `select!`, are charged as the separate hardware elements they are.
     charged: HashSet<(Operation, usize)>,
-    /// Sum of `leakage_energy` for every distinct `(Operation, size)` charged so far -
-    /// the hardware instantiated this run. Ticked into [`Metrics::leakage`] once per
-    /// cycle by [`Metrics::tick`], since leakage drains continuously however often ops fire.
+    /// Sum of `leakage_energy` for every distinct `(Operation, size)` charged
+    /// so far - the hardware instantiated this run.
+    ///
+    /// Ticked into [`Metrics::leakage`] once per cycle by [`Metrics::tick`],
+    /// since leakage drains continuously however often ops fire.
     leakage: f64,
-    /// Whether metered operations currently accrue. The simulator clears this during
-    /// a warmup window with charging off, so warmup work runs but is not metered.
+    /// Whether metered operations currently accrue.
+    ///
+    /// The simulator clears this during a warmup window with charging
+    /// off, so warmup work runs but is not metered.
     charging: bool,
 }
 
@@ -66,10 +74,10 @@ impl Ledger {
 // Metrics {{
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-/// Raw counters accumulated over a simulation run. No derived rates or ratios
-/// are exposed here - callers compute those from these totals, since there's
-/// no one right way to divide them for every use case.
+/// Raw counters accumulated over a simulation run.
 ///
+/// No derived rates or ratios are exposed here - callers compute those from
+/// these totals, since there's no one right way to divide them for every use case.
 // DESIGN(fidelicura): This struct used to also carry `hit_rate`, `miss_rate`,
 // `mpkb`, `energy_per_prediction`, `energy_per_operation`, `energy_per_hit`,
 // `energy_per_area`, and other methods. However, they have been removed as the
@@ -101,15 +109,18 @@ impl Metrics {
         LEDGER.with(|cell| cell.replace(Ledger::new())).metrics
     }
 
-    /// Enable or disable metering for subsequent operations this run. Used by
-    /// the simulator to suppress charging during an unmetered warmup window.
+    /// Enable or disable metering for subsequent operations this run.
+    ///
+    /// Used by the simulator to suppress charging during an unmetered warmup window.
     pub(crate) fn turn(on: bool) {
         LEDGER.with(|cell| cell.borrow_mut().charging = on);
     }
 
-    /// Tick one cycle: adds every instantiated operation's `leakage_energy`
-    /// (see [`Metrics::charge`]) into [`Metrics::leakage`], gated by the
-    /// same metering flag as [`Metrics::charge`]. Call once per cycle.
+    /// Tick one cycle of leakage; call once per cycle.
+    ///
+    /// Adds every instantiated operation's `leakage_energy` (see
+    /// [`Metrics::charge`]) into [`Metrics::leakage`], gated by
+    /// the same metering flag as [`Metrics::charge`].
     pub(crate) fn tick() {
         LEDGER.with(|cell| {
             let mut ledger = cell.borrow_mut();
@@ -128,8 +139,9 @@ impl Metrics {
         });
     }
 
-    /// Charge an [`Operation`] its full [`Cost`]. Panics if any `Cost` field was
-    /// left unset - that surfaces a mispriced model.
+    /// Charge an [`Operation`] its full [`Cost`].
+    ///
+    /// Panics if any `Cost` field was left unset - that surfaces a mispriced model.
     ///
     /// `switching_energy` and `work_time` accrue every time (plus one counted
     /// operation), while `area_space` and `leakage_energy` are added only the
@@ -175,9 +187,9 @@ impl Metrics {
     /// Area only - state holds bits, it is not executed, so it has no
     /// per-execution energy. Call once per run. A stateless predictor reports
     /// `0.0` and adds nothing.
-    pub(crate) fn storage<P>(predictor: &P)
+    pub(crate) fn storage<const BITS: usize, P>(predictor: &P)
     where
-        P: Predictor,
+        P: Predictor<BITS>,
     {
         LEDGER.with(|cell| cell.borrow_mut().metrics.space += predictor.size());
     }
@@ -214,8 +226,9 @@ impl Metrics {
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 thread_local! {
-    /// Per-thread cost table consulted by every charged operation. Thread-locality
-    /// keeps concurrent simulation runs - including parallel tests - isolated.
+    /// Per-thread cost table consulted by every charged operation.
+    ///
+    /// Thread-locality keeps concurrent simulation runs and tests isolated.
     static COSTS: Cell<Costs> = Cell::new(Costs::default());
 }
 
@@ -263,9 +276,11 @@ impl Costs {
 /// Declares the [`Costs`] table from one list of operation names.
 macro_rules! costs {
     ($($field:ident),+ $(,)?) => {
-        /// Operation identity. One variant per cost field; paired with a `size`
-        /// (see [`Metrics::charge`]) it keys which distinct hardware instances
-        /// have already had their static space counted this run.
+        /// Operation identity.
+        ///
+        /// One variant per cost field; paired with a `size` (see
+        /// [`Metrics::charge`]) it keys which distinct hardware
+        /// instances have already had their static space counted this run.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
         #[allow(non_camel_case_types)] // Variants mirror the `Value` method names.
         pub(crate) enum Operation {

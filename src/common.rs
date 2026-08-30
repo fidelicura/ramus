@@ -18,8 +18,8 @@ use crate::primitives::Value;
 // Address {{
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-/// Instruction address of a branch.
-pub type Address = Value<64>;
+/// Instruction address of a branch, `BITS` wide.
+pub type Address<const BITS: usize> = Value<BITS>;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // }} Address
@@ -29,17 +29,17 @@ pub type Address = Value<64>;
 // Info {{
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-/// A single branch record drawn from a trace.
+/// A single branch record drawn from a trace of `BITS`-wide addresses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Info {
+pub struct Info<const BITS: usize> {
     /// Address of the branch instruction.
-    pub address: Address,
+    pub address: Address<BITS>,
     /// Whether the branch was taken.
     pub outcome: Outcome,
     /// Which kind of branch this is.
     pub kind: Kind,
     /// Next address; the target if taken, the fall-through address otherwise.
-    pub next: Address,
+    pub next: Address<BITS>,
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -52,8 +52,8 @@ pub struct Info {
 
 /// What kind of branch a record is.
 ///
-/// Only [`Kind::Conditional`] is predicted and scored; the
-/// rest are fed to [`crate::Predictor::track`] for history.
+/// Only [`Kind::Conditional`] is predicted and scored; the rest are
+/// fed to [`Predictor::track`](crate::Predictor::track) for history.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     /// Conditional branch (taken or not depending on a condition).

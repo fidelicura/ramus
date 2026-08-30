@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ramus::{Address, Array, Outcome, Predictor, Value, select};
+use crate::predictors::Address;
+use ramus::{Array, Outcome, Predictor, Value, select};
 
 #[derive(Default)]
 pub struct LastOutcome {
@@ -37,7 +38,7 @@ impl LastOutcome {
     }
 }
 
-impl Predictor for LastOutcome {
+impl Predictor<64> for LastOutcome {
     fn predict(&mut self, current: Address) -> Outcome {
         let index = Self::index(current);
         let bucket = self.buckets[index];
@@ -45,7 +46,7 @@ impl Predictor for LastOutcome {
         Outcome::from(prediction)
     }
 
-    fn update(&mut self, current: Address, outcome: Outcome, _: Address) {
+    fn update(&mut self, current: Address, outcome: Outcome, _next: Address) {
         let index = Self::index(current);
         self.buckets[index] = select!(outcome => {
             Outcome::Taken => Value::new(1),

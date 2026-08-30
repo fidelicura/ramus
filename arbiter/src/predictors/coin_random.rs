@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ramus::{Address, Outcome, Predictor, Value};
+use crate::predictors::Address;
+use ramus::{Outcome, Predictor, Value};
 
 pub struct CoinRandom {
     state: Value<64>,
@@ -41,8 +42,8 @@ impl Default for CoinRandom {
     }
 }
 
-impl Predictor for CoinRandom {
-    fn predict(&mut self, _: Address) -> Outcome {
+impl Predictor<64> for CoinRandom {
+    fn predict(&mut self, _current: Address) -> Outcome {
         let prediction = self.xorshift();
         Outcome::from(prediction == 1u8)
     }

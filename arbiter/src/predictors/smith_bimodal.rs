@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ramus::{Address, Array, Outcome, Predictor, Value, select};
+use crate::predictors::Address;
+use ramus::{Array, Outcome, Predictor, Value, select};
 
 #[derive(Default)]
 pub struct SmithBimodal {
@@ -21,6 +22,7 @@ pub struct SmithBimodal {
 
 impl SmithBimodal {
     /// Number of buckets in the table - one per branch address (after folding).
+    ///
     /// Kept a power of two so the index can use a cheap AND mask (see `MASK`).
     const LENGTH: usize = 2usize.pow(10);
 
@@ -34,17 +36,15 @@ impl SmithBimodal {
         // and carry no information. Drop them first so neighbouring branches
         // don't all collide into the same bucket.
         let folded = address >> 2u8;
-
         // Keep only the low 10 bits => an index in 0..1024.
         folded & Self::MASK
     }
 }
 
-impl Predictor for SmithBimodal {
+impl Predictor<64> for SmithBimodal {
     fn predict(&mut self, current: Address) -> Outcome {
         let index = Self::index(current);
         let counter = self.table[index];
-
         // Top bit of the 2-bit counter is the verdict: 2 or 3 => "taken".
         let taken = (counter >> 1u8) == 1u8;
         Outcome::from(taken)
@@ -53,7 +53,6 @@ impl Predictor for SmithBimodal {
     fn update(&mut self, current: Address, outcome: Outcome, _next: Address) {
         let index = Self::index(current);
         let counter = self.table[index];
-
         // Saturating, so the counter sticks at the extremes (3 stays 3): that
         // hysteresis is what stops one stray outcome from flipping the verdict.
         // `select!` is `match` that also charges a 2-input multiplexer to the report.

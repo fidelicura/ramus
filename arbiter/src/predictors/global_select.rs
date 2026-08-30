@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ramus::{Address, Array, Outcome, Predictor, Register, Value, select};
+use crate::predictors::Address;
+use ramus::{Array, Outcome, Predictor, Register, Value, select};
 
 #[derive(Default)]
 pub struct GlobalSelect {
@@ -38,7 +39,7 @@ impl GlobalSelect {
     }
 }
 
-impl Predictor for GlobalSelect {
+impl Predictor<64> for GlobalSelect {
     fn predict(&mut self, current: Address) -> Outcome {
         let index = Self::index(*self.register, current);
         let counter = self.table[index];
@@ -46,7 +47,7 @@ impl Predictor for GlobalSelect {
         Outcome::from(prediction)
     }
 
-    fn update(&mut self, current: Address, outcome: Outcome, _: Address) {
+    fn update(&mut self, current: Address, outcome: Outcome, _next: Address) {
         let history = *self.register;
         let index = Self::index(history, current);
         let counter = self.table[index];

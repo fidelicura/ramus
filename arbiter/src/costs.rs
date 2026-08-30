@@ -16,8 +16,9 @@ use ramus::Costs;
 use std::error::Error;
 
 /// Hardware costs, sourced from the SkyWater's `sky130_fd_sc_hd` standard
-/// cell library, drive strength X1, typical corner (`tt_025C_1v80`: 25C,
-/// 1.8V). Each cost is that cell's own Liberty-reported `area` in squared
+/// cell library, drive strength X1, typical corner (`tt_025C_1v80`: 25C, 1.8V).
+///
+/// Each cost is that cell's own Liberty-reported `area` in squared
 /// micrometers; `cell_leakage_power`, average |`internal_power`| over
 /// its output pin's rise and fall tables, and average `cell_rise` and
 /// `cell_fall` delay, all in nanowatts and nanoseconds respectively.

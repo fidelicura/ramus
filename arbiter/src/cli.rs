@@ -18,7 +18,9 @@ use clap::Parser;
 /// over every `--traces` file, printing one JSON report per (trace, predictor) pair.
 #[derive(Parser)]
 pub struct Args {
-    /// Trace files to sweep - CBP-NG 2026 Gzipped. Directories expand to their contained files.
+    /// Trace files to sweep - CBP-NG 2026 Gzipped.
+    ///
+    /// Directories expand to their contained files.
     #[arg(long, required = true, num_args = 1..)]
     pub traces: Vec<String>,
 

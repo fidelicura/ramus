@@ -41,11 +41,13 @@ impl<const BITS: usize> Value<BITS> {
     };
 }
 
-/// Builds the five overflow-aware variants of a numeric op (`wrapping_*`,
-/// `checked_*`, `overflowing_*`, `strict_*`, `saturating_*`) from a single
-/// `u128::overflowing_*` primitive. All five bodies are identical for every
-/// op; they differ only in which primitive is called, the panic message, and
-/// the clamp value used on saturation (`MASK` for growing ops, `ZERO` for
+/// Builds the five overflow-aware variants of a numeric op from a single
+/// `u128::overflowing_*` primitive.
+///
+/// The variants are `wrapping_*`, `checked_*`, `overflowing_*`, `strict_*`,
+/// and `saturating_*`. All five bodies are identical for every op; they
+/// differ only in which primitive is called, the panic message, and the
+/// clamp value used on saturation (`MASK` for growing ops, `ZERO` for
 /// shrinking ones like `sub`/`neg`).
 macro_rules! overflowing_family {
     ($(
@@ -95,8 +97,10 @@ macro_rules! overflowing_family {
 }
 
 /// Builds `wrapping_*`/`checked_*`/`overflowing_*`/`strict_*`/`saturating_*`
-/// for a division-like op, where "overflow" is really divide-by-zero and the
-/// primitive is the raw `/` or `%` operator rather than an `overflowing_*` fn.
+/// for a division-like op.
+///
+/// For these ops "overflow" is really divide-by-zero and the primitive is
+/// the raw `/` or `%` operator rather than an `overflowing_*` fn.
 macro_rules! division_family {
     ($(
         $wrapping:ident / $checked:ident / $overflowing:ident / $strict:ident $(/ $saturating:ident)? via $op:tt;
@@ -136,10 +140,11 @@ macro_rules! division_family {
     )+};
 }
 
-/// Builds `wrapping_*`/`checked_*`/`overflowing_*`/`strict_*` for a shift op
-/// (no `saturating_*`: shifts don't have a meaningful saturation target).
-/// `wrapping`/`overflowing` reduce the shift count modulo `BITS`; `checked`/
-/// `strict` reject any count `>= BITS`.
+/// Builds `wrapping_*`/`checked_*`/`overflowing_*`/`strict_*` for a shift op.
+///
+/// There is no `saturating_*`: shifts don't have a meaningful saturation
+/// target. `wrapping`/`overflowing` reduce the shift count modulo `BITS`;
+/// `checked`/`strict` reject any count `>= BITS`.
 macro_rules! shift_family {
     ($(
         $wrapping:ident / $checked:ident / $overflowing:ident / $strict:ident via $op:tt as $dir:literal;
@@ -179,8 +184,10 @@ impl<const BITS: usize> Value<BITS> {
     /// The zero value.
     pub const ZERO: Self = Self(0);
 
-    /// Wraps a raw `u128` without masking. Caller must guarantee it already fits
-    /// `BITS`; in most cases prefer [`Value::wrapping`] or [`Value::failing`].
+    /// Wraps a raw `u128` without masking.
+    ///
+    /// Caller must guarantee it already fits `BITS`; in most
+    /// cases prefer [`Value::wrapping`] or [`Value::failing`].
     pub const fn new(value: u128) -> Self {
         debug_assert!(
             value & !Self::MASK == 0,
@@ -190,6 +197,7 @@ impl<const BITS: usize> Value<BITS> {
     }
 
     /// Constructs a value, truncating `value` to `BITS` width (i.e. modulo `2^BITS`).
+    ///
     /// Use when an out-of-range input should silently wrap rather than fail.
     pub fn wrapping<V>(value: V) -> Self
     where
@@ -202,6 +210,7 @@ impl<const BITS: usize> Value<BITS> {
     }
 
     /// Constructs a value, returning `None` if `value` does not fit `BITS` width.
+    ///
     /// Use when an out-of-range input should fail rather than silently wrap.
     pub fn failing<V>(value: V) -> Option<Self>
     where
@@ -281,10 +290,12 @@ impl<const BITS: usize> Value<BITS> {
     }
 
     /// Explicit re-typing to `NEW` bits: drops the high bits when narrowing,
-    /// zero-extends when widening. The only sanctioned way to combine two
-    /// `Value`s of different widths - every operator requires matching `BITS`
-    /// on purpose, so a width change is always this explicit, priced step
-    /// rather than something an operator does implicitly.
+    /// zero-extends when widening.
+    ///
+    /// The only sanctioned way to combine two `Value`s of different widths -
+    /// every operator requires matching `BITS` on purpose, so a width change
+    /// is always this explicit, priced step rather than something an operator
+    /// does implicitly.
     ///
     /// Priced like every other method here: keyed by `BITS` (the source
     /// width), same convention as `shift_family!` keying by the shiftee
@@ -380,8 +391,10 @@ shift_operation! {
     Shr::shr => wrapping_shr,
 }
 
-/// `Trait::method => inherent_op` for a `*_assign`: the inherent op charges the
-/// read, then `assign` charges the write back. `$($cast)*` is `as u32` for shifts.
+/// `Trait::method => inherent_op` for a `*_assign`.
+///
+/// The inherent op charges the read, then `assign` charges
+/// the write back. `$($cast)*` is `as u32` for shifts.
 macro_rules! assign_operation {
     ($($trait:ident::$method:ident => $inherent:ident $(as $cast:ty)?),+ $(,)?) => {$(
         impl<const BITS: usize> ops::$trait<Value<BITS>> for Value<BITS> {
@@ -626,6 +639,15 @@ mod tests {
 
         assert_eq!(V::wrapping(1u16).strict_shl(3), 8u32);
         assert_eq!(V::wrapping(8u16).strict_shr(3), 1u32);
+    }
+
+    #[test]
+    fn resize() {
+        free_costs();
+        // Narrowing drops the high bits, widening zero-extends.
+        assert_eq!(V::wrapping(0x1FFu16).resize::<4>(), 0xFu32);
+        assert_eq!(V::wrapping(0xABu16).resize::<16>(), 0xABu32);
+        assert_eq!(V::wrapping(0xABu16).resize::<8>(), 0xABu32); // Same width: identity.
     }
 
     #[test]

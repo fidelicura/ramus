@@ -14,6 +14,7 @@
 
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
+#![deny(rustdoc::broken_intra_doc_links)]
 #![deny(clippy::all)]
 
 mod common;
