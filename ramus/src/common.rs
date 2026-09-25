@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::primitives::Value;
+use std::ops;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // Address {{
@@ -87,7 +88,8 @@ pub enum Outcome {
 
 impl Default for Outcome {
     fn default() -> Self {
-        Self::from(bool::default())
+        let value = bool::default();
+        Self::from(value)
     }
 }
 
@@ -105,6 +107,17 @@ impl From<Outcome> for bool {
         match value {
             Outcome::Taken => true,
             Outcome::Untaken => false,
+        }
+    }
+}
+
+impl ops::Not for Outcome {
+    type Output = Self;
+
+    fn not(self) -> Self::Output {
+        match self {
+            Self::Taken => Self::Untaken,
+            Self::Untaken => Self::Taken,
         }
     }
 }
@@ -130,5 +143,11 @@ mod tests {
     fn outcome_default() {
         assert_eq!(Outcome::from(bool::default()), Outcome::default());
         assert_eq!(Outcome::default(), Outcome::Untaken);
+    }
+
+    #[test]
+    fn outcome_inversions() {
+        assert_eq!(Outcome::Untaken, !Outcome::Taken);
+        assert_eq!(Outcome::Taken, !Outcome::Untaken);
     }
 }

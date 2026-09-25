@@ -12,30 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-[package]
-authors = ["Kirill Bezuglyi <fidelicura@gmail.com>", "et al."]
-categories = ["simulation", "emulation", "algorithms"]
-description = "Trace-driven branch predictor evaluation framework for research and simulation"
-documentation = "https://docs.rs/ramus"
-edition = "2024"
-rust-version = "1.88"
-homepage = "https://github.com/fidelicura/ramus"
-license = "Apache-2.0"
-name = "ramus"
-readme = "README.md"
-repository = "https://github.com/fidelicura/ramus"
-version = "0.0.0"
-
+# SOURCE: <https://doc.rust-lang.org/cargo/reference/workspaces.html#the-workspace-section>
 [workspace]
-members = ["arbiter"]
-
-[dependencies]
-serde = { version = "1.0", features = ["derive"], optional = true }
-
-[features]
-parallel = []
-serde = ["dep:serde"]
-
-[profile.bench]
-inherits = "release"
-debug = "full"
+members = ["arbiter", "ramus"]
+resolver = "2"

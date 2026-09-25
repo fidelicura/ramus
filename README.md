@@ -245,11 +245,11 @@ fn main() {
     // HINT: To compare many predictors or many traces in one go,
     // reach for `Simulator::{run_many_predictors,run_many_sources}`.
     //
-    // HINT: You can spread the `Simulator::run_many_*` sweeps across
-    // threads using `parallel` feature flag, which will use `rayon`.
+    // HINT: You can spread the `Simulator::run_many_*`
+    // sweeps across threads using `parallel` feature flag.
     let metrics = Simulator::run_one(source, predictor, costs, config);
     println!("predictions:  {:.3}", metrics.predictions); // Total amount of predictions performed over trace.
-    println!("hits:         {:.3}", metrics.hits);        // Total Amount of correct predictions performed over trace.
+    println!("hits:         {:.3}", metrics.hits);        // Total amount of correct predictions performed over trace.
     println!("energy:       {:.1}", metrics.energy);      // Total switching energy costs in conventional units.
     println!("leakage:      {:.1}", metrics.leakage);     // Total leakage energy costs ticked over the run's cycles.
     println!("area:         {:.1}", metrics.space);       // Total space costs of the storage and execution units.
