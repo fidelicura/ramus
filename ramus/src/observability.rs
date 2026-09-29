@@ -86,11 +86,11 @@ impl Ledger {
 #[derive(Debug, Default, Clone, Copy, PartialEq, PartialOrd)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Metrics {
-    /// Number of conditional branches predicted.
+    /// Number of branches scored after warmup.
     pub predictions: u64,
     /// Number of metered operations executed.
     pub operations: u64,
-    /// Number of correct predictions.
+    /// Number of predictions with correct direction and, if taken, target.
     pub hits: u64,
     /// Total switching energy charged, summed every time an operation runs.
     pub energy: f64,

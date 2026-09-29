@@ -13,11 +13,15 @@
 // limitations under the License.
 
 use crate::predictors::Address;
-use ramus::{Array, Outcome, Predictor, Value, select};
+use ramus::{Kind, Prediction, Array, Direction, Predictor, Value, select};
 
+/// Bimodal direction counters plus a tagged, direct-mapped target buffer.
 #[derive(Default)]
 pub struct SmithBimodal {
     table: Array<2, { Self::LENGTH }>,
+    tags: Array<64, { Self::LENGTH }>,
+    targets: Array<64, { Self::LENGTH }>,
+    valid: Array<1, { Self::LENGTH }>,
 }
 
 impl SmithBimodal {
@@ -42,27 +46,70 @@ impl SmithBimodal {
 }
 
 impl Predictor<64> for SmithBimodal {
-    fn predict(&mut self, current: Address) -> Outcome {
+    fn predict(&mut self, current: Address, kind: Kind) -> Prediction<64> {
         let index = Self::index(current);
         let counter = self.table[index];
         // Top bit of the 2-bit counter is the verdict: 2 or 3 => "taken".
-        let taken = (counter >> 1u8) == 1u8;
-        Outcome::from(taken)
+        let taken = kind != Kind::Conditional || (counter >> 1u8) == 1u8;
+        let hit = (self.valid[index] == 1u8) & (self.tags[index] == current);
+        let target = self.targets[index];
+        Prediction { direction: Direction::from(taken), target: hit.then_some(target) }
     }
 
-    fn update(&mut self, current: Address, outcome: Outcome, _next: Address) {
+    fn update(&mut self, current: Address, kind: Kind, direction: Direction, next: Address) {
         let index = Self::index(current);
-        let counter = self.table[index];
-        // Saturating, so the counter sticks at the extremes (3 stays 3): that
-        // hysteresis is what stops one stray outcome from flipping the verdict.
-        // `select!` is `match` that also charges a 2-input multiplexer to the report.
-        self.table[index] = select!(outcome => {
-            Outcome::Taken   => counter.saturating_add(1u8),
-            Outcome::Untaken => counter.saturating_sub(1u8),
-        });
+        if kind == Kind::Conditional {
+            let counter = self.table[index];
+            self.table[index] = select!(direction => {
+                Direction::Taken => counter.saturating_add(1u8),
+                Direction::Untaken => counter.saturating_sub(1u8),
+            });
+        }
+        if direction == Direction::Taken {
+            self.tags[index] = current;
+            self.targets[index] = next;
+            self.valid[index] = Value::new(1);
+        }
     }
 
     fn size(&self) -> f64 {
         Array::<2, { Self::LENGTH }>::SIZE
+            + 2.0 * Array::<64, { Self::LENGTH }>::SIZE
+            + Array::<1, { Self::LENGTH }>::SIZE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ramus::{Config, Costs, Info, Simulator, Source};
+    use std::collections::VecDeque;
+
+    struct Trace(VecDeque<Info<64>>);
+    impl Source<64> for Trace {
+        fn fetch(&mut self) -> Option<Info<64>> { self.0.pop_front() }
+    }
+
+    #[test]
+    fn combined_direction_and_target_buffer() {
+        let branch = |address, kind, direction, next| Info {
+            address: Value::new(address), kind, direction, next: Value::new(next),
+        };
+        let trace = Trace(VecDeque::from([
+            branch(0, Kind::UnconditionalDirect, Direction::Taken, 0), // Cold zero target: miss.
+            branch(0, Kind::UnconditionalDirect, Direction::Taken, 0), // Hit.
+            branch(0, Kind::Conditional, Direction::Untaken, 4), // Cold direction: hit.
+            branch(0, Kind::UnconditionalDirect, Direction::Taken, 0), // Target preserved: hit.
+            branch(4096, Kind::CallIndirect, Direction::Taken, 8), // Collision: miss.
+            branch(0, Kind::Return, Direction::Taken, 0), // Evicted: miss.
+            branch(0, Kind::Return, Direction::Taken, 16), // Changed target: miss.
+            branch(0, Kind::Return, Direction::Taken, 16), // New target: hit.
+            branch(0, Kind::Conditional, Direction::Taken, 16), // Counter 0: wrong direction.
+            branch(0, Kind::Conditional, Direction::Taken, 16), // Counter 1: wrong direction.
+            branch(0, Kind::Conditional, Direction::Taken, 16), // Counter 2: hit.
+        ]));
+        let metrics = Simulator::run_one(trace, SmithBimodal::default(), Costs::free(), Config::none());
+        assert_eq!((metrics.predictions, metrics.hits), (11, 5));
+        assert_eq!(metrics.space, 131.0 * 1024.0);
     }
 }

@@ -22,7 +22,7 @@ mod observability;
 mod primitives;
 mod simulator;
 
-pub use common::{Address, Info, Kind, Outcome};
+pub use common::{Address, Direction, Info, Kind, Prediction};
 pub use observability::{Cost, Costs, Metrics};
 pub use primitives::{Array, Register, Value};
 pub use simulator::{Config, Predictor, Simulator, Source};

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use flate2::read::GzDecoder;
-use ramus::{Info, Kind, Outcome, Source, Value};
+use ramus::{Direction, Info, Kind, Source, Value};
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
@@ -93,14 +93,14 @@ impl Reader {
         Some(u64::from_le_bytes(buffer))
     }
 
-    fn read_branch(&mut self, address: u64) -> Option<(Outcome, u64)> {
+    fn read_branch(&mut self, address: u64) -> Option<(Direction, u64)> {
         let taken = self.read_byte()? != 0;
         let next = if taken {
             self.read_word()?
         } else {
             address + 4
         };
-        Some((Outcome::from(taken), next))
+        Some((Direction::from(taken), next))
     }
 
     fn skip_amount(&mut self, count: u64) -> Option<()> {
@@ -155,10 +155,10 @@ impl Reader {
                 None
             };
             self.skip_registers()?;
-            if let (Some(kind), Some((outcome, next))) = (kind, branch) {
+            if let (Some(kind), Some((direction, next))) = (kind, branch) {
                 return Some(Info {
                     address: Value::failing(address).unwrap(),
-                    outcome,
+                    direction,
                     kind,
                     next: Value::failing(next).unwrap(),
                 });

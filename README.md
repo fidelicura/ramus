@@ -42,6 +42,22 @@ API without any unsafe code, (**4**) support for any trace format behind one
 small trait, (**5**) feature-flagged parallel implementation of sweeps over
 many predictors/traces.
 
+## Prediction
+
+`Predictor::predict(current, kind)` returns one `Prediction<BITS>` containing
+both `direction` and `target`. Every branch kind is predicted, scored, and passed
+to `update`; warmup and speculation apply to every branch as well.
+
+A hit requires the correct direction and, for a taken branch, the correct target.
+An unknown target (`target: None`) misses on a taken branch. For a correctly
+predicted untaken branch, the target is irrelevant. Scoring itself adds no
+hardware cost. Reports count one prediction per branch after warmup.
+
+Arbiter's `--predictors smith_bimodal` combines 1024 two-bit direction counters
+with a tagged, direct-mapped target buffer. Conditional direction comes from
+the counters; other branch kinds predict taken. Taken branches train the target
+buffer. All tables contribute to storage and operation costs.
+
 ## Example
 
 > See more examples in [`arbiter`].
@@ -54,6 +70,8 @@ many predictors/traces.
 // which way it usually goes", which is also called "2-bit saturating counter".
 // A table of small saturating counters, one bucket per branch address. Read
 // the bucket to predict; nudge it afterwards toward what actually happened.
+// A tagged buffer remembers each taken target, so every prediction supplies
+// both the direction and the destination.
 //
 // The one rule to internalise: you model hardware with `Value` and `Array`,
 // not plain integers. Every arithmetic operation on a `Value` is metered,
@@ -67,83 +85,73 @@ many predictors/traces.
 // 1. PREDICTOR {{
 ////////////////////////////////////////////////////////////////////////////////
 
-use ramus::{Address, Array, Outcome, Predictor, Value, select};
+use ramus::{Address as BranchAddress, Kind, Prediction, Array, Direction, Predictor, Value, select};
 
-// The whole predictor is one table of 2-bit saturating counters - one bucket
-// per branch address. `Array<BITS, LENGTH>` is the framework's hardware-aware
-// array: `LENGTH` cells, each a `Value<BITS>` (an unsigned integer modelled at
-// exactly `BITS` wide, so its width shows up in the area report). Here that's
-// 1024 buckets of `Value<2>` holding 0..=3, the four states of the classic
-// Smith predictor: strongly/weakly untaken (0, 1) and weakly/strongly
-// taken (2, 3).
-//
-// Every cell of an `Array` starts at zero, so its `Default` gives us a fully
-// initialized table for free - that's why we can `#[derive(Default)]` on the
-// whole predictor instead of hand-writing a constructor that zeroes 1024 cells.
+/// Bimodal direction counters plus a tagged, direct-mapped target buffer.
 #[derive(Default)]
 struct Bimodal {
     table: Array<2, { Self::LENGTH }>,
+    tags: Array<64, { Self::LENGTH }>,
+    targets: Array<64, { Self::LENGTH }>,
+    valid: Array<1, { Self::LENGTH }>,
 }
 
 impl Bimodal {
-    // Number of buckets in the table - one per branch address (after folding).
-    // Kept a power of two so the index can use a cheap AND mask (see `MASK`).
-    const LENGTH: usize = 1024;
+    /// Number of buckets in the table - one per branch address (after folding).
+    ///
+    /// Kept a power of two so the index can use a cheap AND mask (see `MASK`).
+    const LENGTH: usize = 2usize.pow(10);
 
-    // A power-of-two table size lets us fold an address into a bucket with a
-    // single AND instead of a `%`: `addr & (LENGTH - 1)` is the bottom 10 bits.
+    /// A power-of-two table size lets us fold an address into a bucket with a
+    /// single AND instead of a `%`: `addr & (LENGTH - 1)` is the bottom 10 bits.
     const MASK: u32 = Self::LENGTH as u32 - 1;
 
-    // Map a branch address to its bucket index.
-    fn index(address: Address<64>) -> Value<64> {
+    /// Map a branch address to its bucket index.
+    fn index(address: Address) -> Value<64> {
         // Instructions are 4-byte aligned, so the low 2 bits are always zero
         // and carry no information. Drop them first so neighbouring branches
         // don't all collide into the same bucket.
-
-        // Note that `>>` on a `Value` is metered by space and energy costs,
-        // as well as all other operations on `Value` further down.
         let folded = address >> 2u8;
-
         // Keep only the low 10 bits => an index in 0..1024.
         folded & Self::MASK
     }
 }
 
-// A predictor is just these two methods (there's also an optional `track` for
-// history-based designs; the default no-op is fine for bimodal).
 impl Predictor<64> for Bimodal {
-    // This trait method is called once per conditional branch, before we learn the real outcome.
-    fn predict(&mut self, current: Address<64>) -> Outcome {
+    fn predict(&mut self, current: Address, kind: Kind) -> Prediction<64> {
         let index = Self::index(current);
-        let counter = self.table[index]; // Indexing is also metered.
-
-        // Top bit of the 2-bit counter is the verdict: taken or not.
-        let taken = (counter >> 1u8) == 1u8;
-        Outcome::from(taken)
+        let counter = self.table[index];
+        // Top bit of the 2-bit counter is the verdict: 2 or 3 => "taken".
+        let taken = kind != Kind::Conditional || (counter >> 1u8) == 1u8;
+        let hit = (self.valid[index] == 1u8) & (self.tags[index] == current);
+        let target = self.targets[index];
+        Prediction { direction: Direction::from(taken), target: hit.then_some(target) }
     }
 
-    // Called right after, with the branch's true `outcome` (`next` is the
-    // resulting PC, handy for history-based predictors - unused here).
-    fn update(&mut self, current: Address<64>, outcome: Outcome, _next: Address<64>) {
+    fn update(&mut self, current: Address, kind: Kind, direction: Direction, next: Address) {
         let index = Self::index(current);
-        let counter = self.table[index]; // Indexing is also metered.
-
-        // Saturating, so the counter sticks at the extremes (3 stays 3): that
-        // hysteresis is what stops one stray outcome from flipping the verdict.
-        // `select!` is `match` that also charges a 2-input multiplexer cost.
-        self.table[index] = select!(outcome => {
-            Outcome::Taken   => counter.saturating_add(1u8),
-            Outcome::Untaken => counter.saturating_sub(1u8),
-        });
+        if kind == Kind::Conditional {
+            let counter = self.table[index];
+            self.table[index] = select!(direction => {
+                Direction::Taken => counter.saturating_add(1u8),
+                Direction::Untaken => counter.saturating_sub(1u8),
+            });
+        }
+        if direction == Direction::Taken {
+            self.tags[index] = current;
+            self.targets[index] = next;
+            self.valid[index] = Value::new(1);
+        }
     }
 
-    // The predictor's static storage area: the whole counter table. `Array`'s
-    // associated `SIZE` is `BITS * LENGTH`, already in the same area units as
-    // the cost model, so the framework adds it into `Metrics::space` field.
     fn size(&self) -> f64 {
         Array::<2, { Self::LENGTH }>::SIZE
+            + 2.0 * Array::<64, { Self::LENGTH }>::SIZE
+            + Array::<1, { Self::LENGTH }>::SIZE
     }
 }
+
+type Address = BranchAddress<64>;
 
 ////////////////////////////////////////////////////////////////////////////////
 // }} 1. PREDICTOR
@@ -157,7 +165,7 @@ impl Predictor<64> for Bimodal {
 // Here is a small one just for the example.
 ////////////////////////////////////////////////////////////////////////////////
 
-use ramus::{Info, Kind, Source};
+use ramus::{Info, Source};
 use std::collections::VecDeque;
 
 // Hands out pre-built records front-to-back, then `None` once drained.
@@ -173,19 +181,19 @@ impl Trace {
     // A tiny imaginary trace: two conditional branches, one mostly taken
     // and one mostly not, so the counters have something to learn from.
     fn example() -> Self {
-        let branch = |address: u64, outcome: Outcome, next: u64| Info::<64> {
+        let branch = |address: u64, direction: Direction, next: u64| Info::<64> {
             address: Value::wrapping(address), // Branch instruction PC.
-            outcome,
+            direction,
             kind: Kind::Conditional,
             next: Value::wrapping(next), // Branch resolution PC.
         };
 
         Self(VecDeque::from([
-            branch(0x400, Outcome::Taken, 0x480),
-            branch(0x400, Outcome::Taken, 0x480),
-            branch(0x420, Outcome::Untaken, 0x424),
-            branch(0x400, Outcome::Untaken, 0x404),
-            branch(0x420, Outcome::Untaken, 0x424),
+            branch(0x400, Direction::Taken, 0x480),
+            branch(0x400, Direction::Taken, 0x480),
+            branch(0x420, Direction::Untaken, 0x424),
+            branch(0x400, Direction::Untaken, 0x404),
+            branch(0x420, Direction::Untaken, 0x424),
         ]))
     }
 }
@@ -238,7 +246,7 @@ fn main() {
     let predictor = Bimodal::default();
     // `Config::none` scores from the first branch and resolves every prediction
     // immediately; set `warmup`/`charge` to train over (and optionally meter) a
-    // leading window before scoring begins, or `speculation` to let up to that
+    // leading window before scoring begins, or `speculations` to let up to that
     // many predictions sit unresolved before training lags behind them.
     let config = Config::none();
 
@@ -255,17 +263,8 @@ fn main() {
     println!("area:         {:.1}", metrics.space);       // Total space costs of the storage and execution units.
     println!("time:         {:.1}", metrics.time);        // Total work time charged over every metered execution.
 
-    // Running this example prints:
-    //
-    //   predictions: 5
-    //   hits:        2
-    //   energy:      18.5
-    //   leakage:     2.6
-    //   area:        2051.5
-    //   time:        10.5
-    //
-    // The counters start cold (strongly untaken), so only 2 of the 5 branches
-    // are guessed right; the area is dominated by the 2048-bit counter table.
+    assert_eq!(metrics.predictions, 5);
+    assert_eq!(metrics.hits, 2);
 }
 
 ////////////////////////////////////////////////////////////////////////////////

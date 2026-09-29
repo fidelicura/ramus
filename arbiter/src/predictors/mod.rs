@@ -34,13 +34,5 @@ macro_rules! predictors {
 // XXX: Predictor name should not contain symbols that CLI
 // interprets as delimiter between two different arguments.
 predictors! {
-    "always_taken" => always_taken::AlwaysTaken,
-    "never_taken" => never_taken::NeverTaken,
-    "coin_random" => coin_random::CoinRandom,
-    "global_flag" => global_flag::GlobalFlag,
-    "last_outcome" => last_outcome::LastOutcome,
     "smith_bimodal" => smith_bimodal::SmithBimodal,
-    "global_direct" => global_direct::GlobalDirect,
-    "global_select" => global_select::GlobalSelect,
-    "global_share" => global_share::GlobalShare,
 }

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::common::{Address, Info, Kind, Outcome};
+use crate::common::{Address, Direction, Info, Kind, Prediction};
 use crate::observability::{Costs, Metrics};
 use std::collections::VecDeque;
 #[cfg(feature = "parallel")]
@@ -24,25 +24,20 @@ use std::thread;
 
 /// A branch predictor under evaluation, over `BITS`-wide addresses.
 pub trait Predictor<const BITS: usize>: 'static {
-    /// Predict whether the conditional branch at `current` address is taken.
-    ///
-    /// Called only for conditional branches before [`Self::update`].
-    fn predict(&mut self, current: Address<BITS>) -> Outcome;
+    /// Predict both direction and target for every branch, before resolution.
+    /// Only the branch address and kind are known at prediction time.
+    fn predict(&mut self, current: Address<BITS>, kind: Kind) -> Prediction<BITS>;
 
-    /// Update internal state with a scored conditional branch's actual `outcome`.
-    ///
-    /// `next` is the next address (target if taken, fall-through otherwise)
-    /// for history. Called only for conditional branches after [`Self::predict`].
+    /// Resolve a predicted branch, including warmup and target-buffer misses.
+    /// `next` is the target if taken, the fall-through address otherwise.
     #[allow(unused_variables)]
-    fn update(&mut self, current: Address<BITS>, outcome: Outcome, next: Address<BITS>) {}
-
-    /// Observe a non-conditional branch for history.
-    ///
-    /// History-based predictors can fold its [`Kind`], `current`, and `next` PC
-    /// into global/path history. Never called for conditional branches; do not
-    /// train scored tables here.
-    #[allow(unused_variables)]
-    fn track(&mut self, current: Address<BITS>, kind: Kind, outcome: Outcome, next: Address<BITS>) {
+    fn update(
+        &mut self,
+        current: Address<BITS>,
+        kind: Kind,
+        direction: Direction,
+        next: Address<BITS>,
+    ) {
     }
 
     /// Static area of this predictor's state (its tables, counters, history).
@@ -58,16 +53,18 @@ pub trait Predictor<const BITS: usize>: 'static {
 /// This is what lets [`Simulator::run_many_predictors`] hold a heterogeneous
 /// `Vec` of differently-typed predictors behind trait objects.
 impl<const BITS: usize, P: Predictor<BITS> + ?Sized> Predictor<BITS> for Box<P> {
-    fn predict(&mut self, current: Address<BITS>) -> Outcome {
-        (**self).predict(current)
+    fn predict(&mut self, current: Address<BITS>, kind: Kind) -> Prediction<BITS> {
+        (**self).predict(current, kind)
     }
 
-    fn update(&mut self, current: Address<BITS>, outcome: Outcome, next: Address<BITS>) {
-        (**self).update(current, outcome, next)
-    }
-
-    fn track(&mut self, current: Address<BITS>, kind: Kind, outcome: Outcome, next: Address<BITS>) {
-        (**self).track(current, kind, outcome, next)
+    fn update(
+        &mut self,
+        current: Address<BITS>,
+        kind: Kind,
+        direction: Direction,
+        next: Address<BITS>,
+    ) {
+        (**self).update(current, kind, direction, next)
     }
 
     fn size(&self) -> f64 {
@@ -92,9 +89,9 @@ impl<const BITS: usize, P: Predictor<BITS> + ?Sized> Predictor<BITS> for Box<P> 
 /// The predictor's static storage area ([`Predictor::size`]) is always counted
 /// regardless.
 ///
-/// `speculation` is the max number of conditional predictions allowed to
+/// `speculations` is the max number of predictions allowed to
 /// sit predicted-but-unresolved (queued, awaiting [`Predictor::update`]) at
-/// once; `0` resolves every conditional immediately after prediction, same
+/// once; `0` resolves every predicted branch immediately after prediction, same
 /// as an unpipelined run. A predictor is never told which mode it's under -
 /// timing is entirely [`Simulator`]'s concern - so a predictor that wants
 /// true speculative writes plus its own misprediction recovery implements
@@ -109,13 +106,13 @@ pub struct Config {
     pub warmup: u64,
     /// Whether metered operations charge energy and area during the warmup window.
     pub charge: bool,
-    /// Max number of conditional predictions allowed predicted-but-unresolved at once.
+    /// Max number of predictions allowed predicted-but-unresolved at once.
     pub speculations: u64,
 }
 
 impl Config {
     /// No warmup, no speculation: every record is scored from the first,
-    /// every conditional resolves immediately after prediction.
+    /// every predicted branch resolves immediately after prediction.
     pub const fn none() -> Self {
         Self {
             warmup: 0,
@@ -133,7 +130,7 @@ impl Config {
 // Queue {{
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-/// Bounded holding pen of predicted-but-unresolved conditionals, oldest first.
+/// Bounded holding pen of predicted-but-unresolved branches, oldest first.
 ///
 /// `capacity` is fixed at construction; since exactly one [`Info`] is
 /// pushed at a time, [`Queue::push`] can only ever push the queue one over
@@ -144,7 +141,7 @@ struct Queue<const BITS: usize> {
 }
 
 impl<const BITS: usize> Queue<BITS> {
-    /// A queue that holds up to `capacity` unresolved conditionals at once.
+    /// A queue that holds up to `capacity` unresolved branches at once.
     fn new(capacity: usize) -> Self {
         Self {
             capacity,
@@ -171,48 +168,58 @@ impl<const BITS: usize> Queue<BITS> {
         self.items.pop_front()
     }
 
-    /// Feed one record to `predictor`, ticking one cycle of leakage.
-    ///
-    /// Conditionals are predicted and scored (if `score`) immediately -
-    /// ground truth is already known from the trace - then queued via
-    /// [`Self::push`]; [`Predictor::update`] fires only for whatever entry
-    /// that push resolves. Everything else only updates history via
-    /// [`Predictor::track`], immediately.
+    /// Predict and score every branch now, then defer training through the queue.
+    /// Tick leakage after prediction and each resolved update.
     fn feed<P>(&mut self, predictor: &mut P, info: Info<BITS>, score: bool)
     where
         P: Predictor<BITS>,
     {
-        if info.kind == Kind::Conditional {
-            // 1. Predict now; this is the only signal a real predictor gets
-            // before the branch resolves.
-            let prediction = predictor.predict(info.address);
-            Metrics::tick();
+        // 1. Predict using only the branch address and kind; the actual
+        // direction and next address stay hidden until `update`. Tick one
+        // cycle of leakage after the prediction's hardware operations.
+        let prediction = predictor.predict(info.address, info.kind);
+        Metrics::tick();
 
-            // 2. Score now too, not at resolution: the trace already carries
-            // the real outcome, so scoring never needs to wait on `update`.
-            score.then(|| Metrics::outcome(prediction == info.outcome));
+        // 2. Score immediately: the trace already carries the answer, even
+        // though the predictor has not received it yet. Warmup skips this
+        // step. A hit requires the correct direction and, if taken, target;
+        // a correctly predicted untaken branch needs no target.
+        if score {
+            // XXX: Compare raw addresses (`.0`) so checking correctness does
+            // not charge the predictor for a metered `Value` comparison.
+            let hit = prediction.direction == info.direction
+                && (info.direction == Direction::Untaken
+                    || prediction.target.map(|address| address.0) == Some(info.next.0));
+            Metrics::outcome(hit);
+        }
 
-            // 3. Queue this prediction; only train whatever entry that push
-            // resolves (if any) - the rest stay queued, still unresolved.
-            if let Some(resolved) = self.push(info) {
-                predictor.update(resolved.address, resolved.outcome, resolved.next);
-                Metrics::tick();
-            }
-        } else {
-            // Non-conditional: no prediction was ever made, so there is
-            // nothing to queue or resolve - just fold it into history now.
-            predictor.track(info.address, info.kind, info.outcome, info.next);
+        // 3. Queue the branch for training. If this exceeds the unresolved
+        // capacity, train the oldest entry and tick its update cycle. With
+        // capacity zero, this resolves the branch we just predicted; otherwise
+        // pending entries wait for later feeds or a boundary/end drain.
+        if let Some(resolved) = self.push(info) {
+            predictor.update(
+                resolved.address,
+                resolved.kind,
+                resolved.direction,
+                resolved.next,
+            );
             Metrics::tick();
         }
     }
 
-    /// Resolve every conditional still queued, oldest first, via [`Predictor::update`].
+    /// Resolve every predicted branch still queued, oldest first, via [`Predictor::update`].
     fn drain<P>(&mut self, predictor: &mut P)
     where
         P: Predictor<BITS>,
     {
         while let Some(resolved) = self.pop() {
-            predictor.update(resolved.address, resolved.outcome, resolved.next);
+            predictor.update(
+                resolved.address,
+                resolved.kind,
+                resolved.direction,
+                resolved.next,
+            );
             Metrics::tick();
         }
     }
@@ -254,9 +261,9 @@ impl Simulator {
         Costs::set(costs);
         Metrics::storage(&predictor);
 
-        // 2. One queue for the whole run: holds up to `config.speculation`
-        // conditionals predicted-but-not-yet-trained, modeling how far
-        // `update` can lag behind `predict` under pipeline overlap.
+        // 2. One queue for the whole run: holds up to `config.speculations`
+        // branches predicted-but-not-yet-trained, modeling how far `update`
+        // can lag behind `predict` under pipeline overlap.
         let mut queue = Queue::new(config.speculations as usize);
 
         // 3. Warmup window: feed the leading `config.warmup` records with
@@ -285,7 +292,7 @@ impl Simulator {
         }
 
         // 6. Trace end: anything still queued was fetched (and scored) but
-        // never trained - drain it now so no conditional silently skips
+        // never trained - drain it now so no predicted branch silently skips
         // `update`, however deep the queue still is.
         queue.drain(&mut predictor);
 
@@ -437,13 +444,16 @@ mod tests {
         }
     }
 
-    /// Always predicts `Taken`; leaves `Predictor::{update,track}` as no-op.
+    /// Always predicts `Taken`; leaves `Predictor::update` as no-op.
     #[derive(Clone)]
     struct AlwaysTaken;
 
     impl Predictor<64> for AlwaysTaken {
-        fn predict(&mut self, _current: Address<64>) -> Outcome {
-            Outcome::Taken
+        fn predict(&mut self, _current: Address<64>, _kind: Kind) -> Prediction<64> {
+            Prediction {
+                direction: Direction::Taken,
+                target: Some(Address::ZERO),
+            }
         }
 
         fn size(&self) -> f64 {
@@ -456,8 +466,11 @@ mod tests {
     struct Stateful<const AREA: usize>;
 
     impl<const AREA: usize> Predictor<64> for Stateful<AREA> {
-        fn predict(&mut self, _current: Address<64>) -> Outcome {
-            Outcome::Taken
+        fn predict(&mut self, _current: Address<64>, _kind: Kind) -> Prediction<64> {
+            Prediction {
+                direction: Direction::Taken,
+                target: Some(Address::ZERO),
+            }
         }
 
         fn size(&self) -> f64 {
@@ -471,9 +484,12 @@ mod tests {
     struct OneAdd;
 
     impl Predictor<64> for OneAdd {
-        fn predict(&mut self, _current: Address<64>) -> Outcome {
+        fn predict(&mut self, _current: Address<64>, _kind: Kind) -> Prediction<64> {
             let _ = crate::Value::<8>::ZERO.wrapping_add(1u8);
-            Outcome::Taken
+            Prediction {
+                direction: Direction::Taken,
+                target: Some(Address::ZERO),
+            }
         }
 
         fn size(&self) -> f64 {
@@ -481,38 +497,156 @@ mod tests {
         }
     }
 
-    fn branch(kind: Kind, outcome: Outcome) -> Info<64> {
+    fn branch(kind: Kind, direction: Direction) -> Info<64> {
         Info {
             address: Address::ZERO,
-            outcome,
+            direction,
             kind,
             next: Address::ZERO,
         }
     }
 
     #[test]
-    fn run_scores_only_conditionals() {
+    fn targets_share_scoring_warmup_and_deferred_resolution() {
+        struct Target {
+            target: Option<Address<64>>,
+            updates: Rc<RefCell<Vec<Kind>>>,
+        }
+        impl Predictor<64> for Target {
+            fn predict(&mut self, _: Address<64>, _: Kind) -> Prediction<64> {
+                Prediction {
+                    direction: Direction::Taken,
+                    target: self.target,
+                }
+            }
+            fn update(
+                &mut self,
+                _: Address<64>,
+                kind: Kind,
+                direction: Direction,
+                next: Address<64>,
+            ) {
+                self.updates.borrow_mut().push(kind);
+                if direction == Direction::Taken {
+                    self.target = Some(next);
+                }
+                let _ = crate::Value::<8>::ZERO.wrapping_add(1u8);
+            }
+            fn size(&self) -> f64 {
+                0.0
+            }
+        }
+        let kinds = [
+            Kind::Conditional,
+            Kind::UnconditionalDirect,
+            Kind::UnconditionalIndirect,
+            Kind::CallDirect,
+            Kind::CallIndirect,
+            Kind::Return,
+        ];
+        for (warmup, speculations, predictions, hits) in
+            [(0, 0, 6, 4), (0, 2, 6, 2), (2, 0, 4, 4), (2, 8, 4, 4)]
+        {
+            let updates = Rc::new(RefCell::new(Vec::new()));
+            let predictor: Box<dyn Predictor<64>> = Box::new(Target {
+                target: None,
+                updates: updates.clone(),
+            });
+            let source = kinds
+                .into_iter()
+                .enumerate()
+                .map(|(i, kind)| {
+                    let mut info = branch(
+                        kind,
+                        if i == 0 {
+                            Direction::Untaken
+                        } else {
+                            Direction::Taken
+                        },
+                    );
+                    info.next = Address::new(if i == 0 { 4 } else { 0 });
+                    info
+                })
+                .collect::<VecDeque<_>>();
+            // Only update's add is priced: scoring a target must not charge comparisons.
+            let costs = Costs {
+                wrapping_add: Cost {
+                    switching_energy: Some(1.0),
+                    ..Cost::free()
+                },
+                ..Costs::default()
+            };
+            let metrics = Simulator::run_one(
+                source,
+                predictor,
+                costs,
+                Config {
+                    warmup,
+                    charge: false,
+                    speculations,
+                },
+            );
+            assert_eq!((metrics.predictions, metrics.hits), (predictions, hits));
+            assert_eq!(metrics.energy, (6 - warmup) as f64);
+            assert_eq!(*updates.borrow(), kinds); // Includes boundary and final drains.
+        }
+    }
+
+    #[test]
+    fn hit_requires_direction_and_taken_target() {
+        struct Fixed(Prediction<64>);
+        impl Predictor<64> for Fixed {
+            fn predict(&mut self, _: Address<64>, _: Kind) -> Prediction<64> {
+                self.0
+            }
+            fn size(&self) -> f64 {
+                0.0
+            }
+        }
+        for (predicted, target, actual, hit) in [
+            (Direction::Taken, Some(0), Direction::Taken, true),
+            (Direction::Taken, Some(4), Direction::Taken, false),
+            (Direction::Taken, None, Direction::Taken, false),
+            (Direction::Untaken, Some(0), Direction::Taken, false),
+            (Direction::Taken, Some(0), Direction::Untaken, false),
+            (Direction::Untaken, None, Direction::Untaken, true),
+            (Direction::Untaken, Some(4), Direction::Untaken, true),
+        ] {
+            let source = VecDeque::from([branch(Kind::Conditional, actual)]);
+            let predictor = Fixed(Prediction {
+                direction: predicted,
+                target: target.map(Address::new),
+            });
+            let metrics = Simulator::run_one(source, predictor, Costs::default(), Config::none());
+            assert_eq!(metrics.predictions, 1);
+            assert_eq!(metrics.hits, u64::from(hit));
+            assert_eq!(metrics.operations, 0);
+        }
+    }
+
+    #[test]
+    fn run_scores_all_branch_kinds() {
         let source = VecDeque::from([
-            branch(Kind::Conditional, Outcome::Taken), // Predicted, hit.
-            branch(Kind::Conditional, Outcome::Untaken), // Predicted, miss.
-            branch(Kind::Return, Outcome::Taken),      // Only tracked.
+            branch(Kind::Conditional, Direction::Taken), // Predicted, hit.
+            branch(Kind::Conditional, Direction::Untaken), // Predicted, miss.
+            branch(Kind::Return, Direction::Taken),      // Predicted, hit.
         ]);
         let predictor = AlwaysTaken;
         let costs = Costs::default();
         let config = Config::none();
 
         let metrics = Simulator::run_one(source, predictor, costs, config);
-        assert_eq!(metrics.predictions, 2);
-        assert_eq!(metrics.hits, 1); // Misses: predictions - hits == 1.
+        assert_eq!(metrics.predictions, 3);
+        assert_eq!(metrics.hits, 2); // Misses: predictions - hits == 1.
     }
 
     #[test]
     fn warmup_trains_but_does_not_score_leading_records() {
         // Three conditionals; warm over the first two, score only the third.
         let source = VecDeque::from([
-            branch(Kind::Conditional, Outcome::Taken),
-            branch(Kind::Conditional, Outcome::Taken),
-            branch(Kind::Conditional, Outcome::Taken),
+            branch(Kind::Conditional, Direction::Taken),
+            branch(Kind::Conditional, Direction::Taken),
+            branch(Kind::Conditional, Direction::Taken),
         ]);
         let predictor = AlwaysTaken;
         let costs = Costs::default();
@@ -532,8 +666,8 @@ mod tests {
         // Only two records but a warmup window of five: the warmup loop must
         // stop at source exhaustion rather than assume the count is available.
         let source = VecDeque::from([
-            branch(Kind::Conditional, Outcome::Taken),
-            branch(Kind::Conditional, Outcome::Taken),
+            branch(Kind::Conditional, Direction::Taken),
+            branch(Kind::Conditional, Direction::Taken),
         ]);
         let predictor = AlwaysTaken;
         let costs = Costs::default();
@@ -558,9 +692,9 @@ mod tests {
         };
         let trace = || {
             VecDeque::from([
-                branch(Kind::Conditional, Outcome::Taken),
-                branch(Kind::Conditional, Outcome::Taken),
-                branch(Kind::Conditional, Outcome::Taken),
+                branch(Kind::Conditional, Direction::Taken),
+                branch(Kind::Conditional, Direction::Taken),
+                branch(Kind::Conditional, Direction::Taken),
             ])
         };
 
@@ -604,7 +738,7 @@ mod tests {
 
     #[test]
     fn run_charges_predictor_storage_into_total_space() {
-        let source = VecDeque::from([branch(Kind::Conditional, Outcome::Taken)]);
+        let source = VecDeque::from([branch(Kind::Conditional, Direction::Taken)]);
         let predictor = Stateful::<8>;
         // Free ops so only the predictor's state area shows up.
         let costs = Costs::free();
@@ -617,9 +751,9 @@ mod tests {
     #[test]
     fn run_many_predictors_gives_each_predictor_the_full_trace() {
         let source = VecDeque::from([
-            branch(Kind::Conditional, Outcome::Taken),
-            branch(Kind::Conditional, Outcome::Untaken),
-            branch(Kind::Return, Outcome::Taken),
+            branch(Kind::Conditional, Direction::Taken),
+            branch(Kind::Conditional, Direction::Untaken),
+            branch(Kind::Return, Direction::Taken),
         ]);
         #[cfg(not(feature = "parallel"))]
         let predictors = vec![
@@ -634,18 +768,18 @@ mod tests {
         let costs = Costs::default();
         let config = Config::none();
 
-        // Each predictor sees its own clone of the source, so both score all conditionals.
+        // Each predictor sees its own clone of the source, scoring every branch.
         let metrics = Simulator::run_many_predictors(source, predictors, costs, config);
         assert_eq!(metrics.len(), 2);
-        assert!(metrics.iter().all(|m| m.predictions == 2 && m.hits == 1));
+        assert!(metrics.iter().all(|m| m.predictions == 3 && m.hits == 2));
     }
 
     #[test]
     fn run_many_sources_runs_the_predictor_over_each() {
         let source = || {
             VecDeque::from([
-                branch(Kind::Conditional, Outcome::Taken),
-                branch(Kind::Conditional, Outcome::Untaken),
+                branch(Kind::Conditional, Direction::Taken),
+                branch(Kind::Conditional, Direction::Untaken),
             ])
         };
         #[cfg(not(feature = "parallel"))]
@@ -676,7 +810,7 @@ mod tests {
     fn run_many_predictors_propagates_a_panicking_predictor() {
         struct Panics;
         impl Predictor<64> for Panics {
-            fn predict(&mut self, _current: Address<64>) -> Outcome {
+            fn predict(&mut self, _current: Address<64>, _kind: Kind) -> Prediction<64> {
                 panic!("boom");
             }
 
@@ -685,7 +819,7 @@ mod tests {
             }
         }
 
-        let source = VecDeque::from([branch(Kind::Conditional, Outcome::Taken)]);
+        let source = VecDeque::from([branch(Kind::Conditional, Direction::Taken)]);
         let predictors: Vec<Box<dyn Predictor<64> + Send>> = vec![Box::new(Panics)];
 
         let _ =
@@ -709,19 +843,28 @@ mod tests {
     }
 
     /// Predicts whatever `update` last trained it with; starts `Untaken`. Its
-    /// `predict` result depends only on the *last resolved* outcome, so
+    /// `predict` result depends only on the *last resolved* direction, so
     /// delaying `update` changes what later `predict` calls see - this is
     /// what makes queued-vs-immediate resolution observable in a test.
     #[derive(Clone)]
-    struct LastOutcome(Outcome);
+    struct LastDirection(Direction);
 
-    impl Predictor<64> for LastOutcome {
-        fn predict(&mut self, _current: Address<64>) -> Outcome {
-            self.0
+    impl Predictor<64> for LastDirection {
+        fn predict(&mut self, _current: Address<64>, _kind: Kind) -> Prediction<64> {
+            Prediction {
+                direction: self.0,
+                target: Some(Address::ZERO),
+            }
         }
 
-        fn update(&mut self, _current: Address<64>, outcome: Outcome, _next: Address<64>) {
-            self.0 = outcome;
+        fn update(
+            &mut self,
+            _current: Address<64>,
+            _kind: Kind,
+            direction: Direction,
+            _next: Address<64>,
+        ) {
+            self.0 = direction;
         }
 
         fn size(&self) -> f64 {
@@ -732,12 +875,12 @@ mod tests {
     #[test]
     fn speculation_zero_resolves_immediately_like_baseline() {
         let source = VecDeque::from([
-            branch(Kind::Conditional, Outcome::Taken),
-            branch(Kind::Conditional, Outcome::Untaken),
-            branch(Kind::Conditional, Outcome::Taken),
-            branch(Kind::Conditional, Outcome::Taken),
+            branch(Kind::Conditional, Direction::Taken),
+            branch(Kind::Conditional, Direction::Untaken),
+            branch(Kind::Conditional, Direction::Taken),
+            branch(Kind::Conditional, Direction::Taken),
         ]);
-        let predictor = LastOutcome(Outcome::Untaken);
+        let predictor = LastDirection(Direction::Untaken);
         let costs = Costs::default();
         let config = Config::none(); // speculation: 0.
 
@@ -750,12 +893,12 @@ mod tests {
     #[test]
     fn speculation_defers_training_and_changes_scoring() {
         let source = VecDeque::from([
-            branch(Kind::Conditional, Outcome::Taken),
-            branch(Kind::Conditional, Outcome::Untaken),
-            branch(Kind::Conditional, Outcome::Taken),
-            branch(Kind::Conditional, Outcome::Taken),
+            branch(Kind::Conditional, Direction::Taken),
+            branch(Kind::Conditional, Direction::Untaken),
+            branch(Kind::Conditional, Direction::Taken),
+            branch(Kind::Conditional, Direction::Taken),
         ]);
-        let predictor = LastOutcome(Outcome::Untaken);
+        let predictor = LastDirection(Direction::Untaken);
         let costs = Costs::default();
         let config = Config {
             warmup: 0,
@@ -777,11 +920,20 @@ mod tests {
     struct ChargeOnUpdate;
 
     impl Predictor<64> for ChargeOnUpdate {
-        fn predict(&mut self, _current: Address<64>) -> Outcome {
-            Outcome::Taken
+        fn predict(&mut self, _current: Address<64>, _kind: Kind) -> Prediction<64> {
+            Prediction {
+                direction: Direction::Taken,
+                target: Some(Address::ZERO),
+            }
         }
 
-        fn update(&mut self, _current: Address<64>, _outcome: Outcome, _next: Address<64>) {
+        fn update(
+            &mut self,
+            _current: Address<64>,
+            _kind: Kind,
+            _direction: Direction,
+            _next: Address<64>,
+        ) {
             let _ = crate::Value::<8>::ZERO.wrapping_add(1u8);
         }
 
@@ -793,8 +945,8 @@ mod tests {
     #[test]
     fn speculation_drains_outstanding_predictions_at_trace_end() {
         let source = VecDeque::from([
-            branch(Kind::Conditional, Outcome::Taken),
-            branch(Kind::Conditional, Outcome::Taken),
+            branch(Kind::Conditional, Direction::Taken),
+            branch(Kind::Conditional, Direction::Taken),
         ]);
         let costs = Costs {
             wrapping_add: Cost {
@@ -821,12 +973,21 @@ mod tests {
     struct Logger(Rc<RefCell<Vec<&'static str>>>);
 
     impl Predictor<64> for Logger {
-        fn predict(&mut self, _current: Address<64>) -> Outcome {
+        fn predict(&mut self, _current: Address<64>, _kind: Kind) -> Prediction<64> {
             self.0.borrow_mut().push("predict");
-            Outcome::Taken
+            Prediction {
+                direction: Direction::Taken,
+                target: Some(Address::ZERO),
+            }
         }
 
-        fn update(&mut self, _current: Address<64>, _outcome: Outcome, _next: Address<64>) {
+        fn update(
+            &mut self,
+            _current: Address<64>,
+            _kind: Kind,
+            _direction: Direction,
+            _next: Address<64>,
+        ) {
             self.0.borrow_mut().push("update");
         }
 
@@ -839,10 +1000,10 @@ mod tests {
     fn speculation_drains_queue_at_warmup_boundary_before_metered_phase() {
         let log = Rc::new(RefCell::new(Vec::new()));
         let source = VecDeque::from([
-            branch(Kind::Conditional, Outcome::Taken),
-            branch(Kind::Conditional, Outcome::Taken),
-            branch(Kind::Conditional, Outcome::Taken),
-            branch(Kind::Conditional, Outcome::Taken),
+            branch(Kind::Conditional, Direction::Taken),
+            branch(Kind::Conditional, Direction::Taken),
+            branch(Kind::Conditional, Direction::Taken),
+            branch(Kind::Conditional, Direction::Taken),
         ]);
         let predictor = Logger(log.clone());
         let costs = Costs::free();
