@@ -31,7 +31,7 @@ pub type Address<const BITS: usize> = Value<BITS>;
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 /// A single branch record drawn from a trace of `BITS`-wide addresses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub struct Info<const BITS: usize> {
     /// Address of the branch instruction.
     pub address: Address<BITS>,
@@ -55,9 +55,7 @@ pub struct Info<const BITS: usize> {
 #[derive(Debug, Clone, Copy)]
 pub struct Prediction<const BITS: usize> {
     pub direction: Direction,
-    /// `None` means the target is unknown (for example, a cold buffer entry).
-    /// Ignored when the branch is correctly predicted untaken.
-    pub target: Option<Address<BITS>>,
+    pub target: Target<BITS>,
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -71,20 +69,58 @@ pub struct Prediction<const BITS: usize> {
 /// What kind of branch a record is.
 ///
 /// Every kind is predicted, scored, and resolved through the same predictor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+#[derive(Debug, Clone, Copy)]
 pub enum Kind {
-    /// Conditional branch (taken or not depending on a condition).
-    Conditional,
+    /// Conditional direct branch (taken or not depending on a condition).
+    ConditionalDirect = 1,
     /// Unconditional direct branch (target encoded in the instruction).
-    UnconditionalDirect,
+    UnconditionalDirect = 2,
     /// Unconditional indirect branch (target from a register).
-    UnconditionalIndirect,
+    UnconditionalIndirect = 3,
     /// Direct call of routine.
-    CallDirect,
+    CallDirect = 4,
     /// Indirect call of routine.
-    CallIndirect,
+    CallIndirect = 5,
     /// Return from routine.
-    Return,
+    Return = 6,
+}
+
+impl Kind {
+    pub const fn is_conditional(&self) -> bool {
+        matches!(self, Self::ConditionalDirect)
+    }
+
+    pub const fn is_indirect(&self) -> bool {
+        matches!(self, Self::UnconditionalIndirect | Self::CallIndirect)
+    }
+}
+
+impl<const BITS: usize> From<Value<BITS>> for Kind {
+    fn from(value: Value<BITS>) -> Self {
+        match value.0 {
+            1 => Self::ConditionalDirect,
+            2 => Self::UnconditionalDirect,
+            3 => Self::UnconditionalIndirect,
+            4 => Self::CallDirect,
+            5 => Self::CallIndirect,
+            6 => Self::Return,
+            discriminant => panic!("wrong discriminant for `Kind`: {discriminant}"),
+        }
+    }
+}
+
+impl<const BITS: usize> From<Kind> for Value<BITS> {
+    fn from(value: Kind) -> Self {
+        match value {
+            Kind::ConditionalDirect => Self::new(1),
+            Kind::UnconditionalDirect => Self::new(2),
+            Kind::UnconditionalIndirect => Self::new(3),
+            Kind::CallDirect => Self::new(4),
+            Kind::CallIndirect => Self::new(5),
+            Kind::Return => Self::new(6),
+        }
+    }
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -96,7 +132,8 @@ pub enum Kind {
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 /// Whether a branch was taken.
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+// #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy)]
 pub enum Direction {
     Taken,
     Untaken,
@@ -169,8 +206,8 @@ mod tests {
 
     #[test]
     fn direction_conversions() {
-        assert_eq!(Direction::from(true), Direction::Taken);
-        assert_eq!(Direction::from(false), Direction::Untaken);
+        assert_eq!(Direction::from(true).0, Direction::Taken.0);
+        assert_eq!(Direction::from(false).0, Direction::Untaken.0);
 
         assert!(bool::from(Direction::Taken));
         assert!(!bool::from(Direction::Untaken));
@@ -178,13 +215,13 @@ mod tests {
 
     #[test]
     fn direction_default() {
-        assert_eq!(Direction::from(bool::default()), Direction::default());
-        assert_eq!(Direction::default(), Direction::Untaken);
+        assert_eq!(Direction::from(bool::default()).0, Direction::default().0);
+        assert_eq!(Direction::default().0, Direction::Untaken.0);
     }
 
     #[test]
     fn direction_inversions() {
-        assert_eq!(Direction::Untaken, !Direction::Taken);
-        assert_eq!(Direction::Taken, !Direction::Untaken);
+        assert_eq!(Direction::Untaken.0, (!Direction::Taken).0);
+        assert_eq!(Direction::Taken.0, (!Direction::Untaken).0);
     }
 }

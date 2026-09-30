@@ -16,6 +16,8 @@ use ramus::Predictor;
 
 /// Arbiter traces carry 64-bit addresses; every predictor here is 64-bit.
 pub type Address = ramus::Address<64>;
+/// Arbiter traces carry 64-bit addresses; every predictor here is 64-bit.
+pub type Target = Address;
 
 /// Registers each predictor module and builds [`ALL`] - predictors registry.
 ///
@@ -34,5 +36,5 @@ macro_rules! predictors {
 // XXX: Predictor name should not contain symbols that CLI
 // interprets as delimiter between two different arguments.
 predictors! {
-    "smith_bimodal" => smith_bimodal::SmithBimodal,
+    "smith_bimodal" => sct_btb_ras::Predictor,
 }

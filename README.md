@@ -52,9 +52,10 @@ address is supplied to `predict`; branch kind is revealed during `update`.
 A report separates direction accuracy, next-address accuracy, and early next-PC
 accuracy. Both direction and next address are scored for every CFI, regardless
 of kind or whether it is taken. `Info::next` is the actual next address: the
-target when taken, or fall-through when untaken. A missing predicted address
-(`target: None`) is an address miss. Scoring itself adds no hardware cost.
-Reports count one branch prediction per CFI after warmup.
+target when taken, or fall-through when untaken. A cold predictor must still
+provide a best-effort next address; the example below falls back to sequential
+`PC + 4`. Scoring itself adds no hardware cost. Reports count one branch
+prediction per CFI after warmup.
 
 Arbiter's `--predictors smith_bimodal` combines 1024 two-bit direction counters
 with a tagged, direct-mapped target buffer. Direction comes from
@@ -88,7 +89,7 @@ buffer. All tables contribute to storage and operation costs.
 // 1. PREDICTOR {{
 ////////////////////////////////////////////////////////////////////////////////
 
-use ramus::{Address as BranchAddress, Kind, Prediction, Array, Direction, Predictor, Value, select};
+use ramus::{Address as BranchAddress, Target, Kind, Prediction, Array, Direction, Predictor, Value, select};
 
 /// Bimodal direction counters plus a tagged, direct-mapped target buffer.
 #[derive(Default)]
@@ -121,14 +122,18 @@ impl Bimodal {
 }
 
 impl Predictor<64> for Bimodal {
-    fn predict(&mut self, current: Address) -> Prediction<64> {
-        let index = Self::index(current);
+    fn predict(&mut self, address: Address) -> Prediction<64> {
+        let index = Self::index(address);
         let counter = self.table[index];
         // Top bit of the 2-bit counter is the verdict: 2 or 3 => "taken".
         let taken = (counter >> 1u8) == 1u8;
-        let hit = (self.valid[index] == 1u8) & (self.tags[index] == current);
-        let target = self.targets[index];
-        Prediction { direction: Direction::from(taken), target: hit.then_some(target) }
+        let hit = (self.valid[index] == 1u8) & (self.tags[index] == address);
+        let buffered_target: Target<64> = self.targets[index];
+        let target = select!(hit => {
+            true => buffered_target,
+            false => address.wrapping_add(4u8),
+        });
+        Prediction { direction: Direction::from(taken), target }
     }
 
     fn update(&mut self, current: Address, _kind: Kind, direction: Direction, next: Address) {
@@ -136,14 +141,14 @@ impl Predictor<64> for Bimodal {
         // Learn direction for every branch kind, including unconditional branches.
         let counter = self.table[index];
         self.table[index] = select!(direction => {
-            Direction::Taken => counter.saturating_add(1u8),
+            Direction::Taken => {
+                self.tags[index] = current;
+                self.targets[index] = next;
+                self.valid[index] = Value::new(1);
+                counter.saturating_add(1u8)
+            },
             Direction::Untaken => counter.saturating_sub(1u8),
         });
-        if direction == Direction::Taken {
-            self.tags[index] = current;
-            self.targets[index] = next;
-            self.valid[index] = Value::new(1);
-        }
     }
 
     fn size(&self) -> f64 {
@@ -236,6 +241,7 @@ fn main() {
     // data-containing structures, so results dump straight to format you need.
     let costs = Costs {
         wrapping_shr:   Cost { switching_energy: Some(0.5), leakage_energy: Some(0.05), area_space: Some(0.6), work_time: Some(0.2) }, // `>>`: index/counter shifters.
+        wrapping_add:   Cost { switching_energy: Some(0.3), leakage_energy: Some(0.03), area_space: Some(0.4), work_time: Some(0.2) }, // Sequential PC fallback on a target-buffer miss.
         bitand:         Cost { switching_energy: Some(0.1), leakage_energy: Some(0.01), area_space: Some(0.2), work_time: Some(0.1) }, // `&`: mask AND over the index.
         saturating_add: Cost { switching_energy: Some(0.3), leakage_energy: Some(0.03), area_space: Some(0.4), work_time: Some(0.2) }, // `Value::saturating_add`: incrementer.
         saturating_sub: Cost { switching_energy: Some(0.3), leakage_energy: Some(0.03), area_space: Some(0.4), work_time: Some(0.2) }, // `Value::saturating_sub`: decrementer.
@@ -258,15 +264,15 @@ fn main() {
     // HINT: You can spread the `Simulator::run_many_*`
     // sweeps across threads using `parallel` feature flag.
     let metrics = Simulator::run_one(source, predictor, costs, config);
-    println!("predictions:  {:.3}", metrics.predictions); // Total amount of predictions performed over trace.
-    println!("hits:         {:.3}", metrics.hits);        // Total amount of correct predictions performed over trace.
-    println!("energy:       {:.1}", metrics.energy);      // Total switching energy costs in conventional units.
-    println!("leakage:      {:.1}", metrics.leakage);     // Total leakage energy costs ticked over the run's cycles.
-    println!("area:         {:.1}", metrics.space);       // Total space costs of the storage and execution units.
-    println!("time:         {:.1}", metrics.time);        // Total work time charged over every metered execution.
+    println!("predictions:  {:.3}", metrics.total_predictions); // Total amount of predictions performed over trace.
+    println!("hits:         {:.3}", metrics.total_hits);        // Total amount of correct predictions performed over trace.
+    println!("energy:       {:.1}", metrics.total_energy);      // Total switching energy costs in conventional units.
+    println!("leakage:      {:.1}", metrics.total_leakage);     // Total leakage energy costs ticked over the run's cycles.
+    println!("area:         {:.1}", metrics.total_space);       // Total space costs of the storage and execution units.
+    println!("time:         {:.1}", metrics.total_time);        // Total work time charged over every metered execution.
 
-    assert_eq!(metrics.predictions, 5);
-    assert_eq!(metrics.hits, 0);
+    assert_eq!(metrics.total_predictions, 5);
+    assert_eq!(metrics.total_hits, 2);
 }
 
 ////////////////////////////////////////////////////////////////////////////////

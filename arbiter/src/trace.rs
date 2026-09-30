@@ -141,7 +141,7 @@ impl Reader {
                     self.skip_amount(11)?;
                     None
                 },
-                3 => Some(Kind::Conditional),
+                3 => Some(Kind::ConditionalDirect),
                 4 => Some(Kind::UnconditionalDirect),
                 5 => Some(Kind::UnconditionalIndirect),
                 9 => Some(Kind::CallDirect),
