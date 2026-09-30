@@ -753,7 +753,7 @@ mod tests {
         let _ = a == 1u8; // Value/uN eq.
         let _ = a < 9u32; // Value/uN ord.
 
-        assert_eq!(Metrics::reset().energy, 4.0); // 4 compares * 1 select.
+        assert_eq!(Metrics::reset().total_energy, 4.0); // 4 compares * 1 select.
         Costs::set(Costs::default());
     }
 
@@ -775,7 +775,7 @@ mod tests {
         let mut a = V::wrapping(1u16);
         a += V::wrapping(1u16);
 
-        assert_eq!(Metrics::reset().energy, 7.0); // 2 read + 5 write.
+        assert_eq!(Metrics::reset().total_energy, 7.0); // 2 read + 5 write.
         Costs::set(Costs::default());
     }
 
@@ -799,7 +799,7 @@ mod tests {
         a <<= V::wrapping(1u16);
         a >>= V::wrapping(1u16);
 
-        assert_eq!(Metrics::reset().energy, 6.0); // 6 assigns * 1 write.
+        assert_eq!(Metrics::reset().total_energy, 6.0); // 6 assigns * 1 write.
         Costs::set(Costs::default());
     }
 

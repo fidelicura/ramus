@@ -25,6 +25,12 @@ pub struct Report<'a> {
     pub total_predictions: u64,
     pub total_hits: u64,
     pub total_misses: u64,
+    pub total_direction_predictions: u64,
+    pub total_direction_hits: u64,
+    pub total_direction_misses: u64,
+    pub total_target_predictions: u64,
+    pub total_target_hits: u64,
+    pub total_target_misses: u64,
     pub total_operations: u64,
     pub total_energy: f64,
     pub total_leakage: f64,
@@ -32,6 +38,8 @@ pub struct Report<'a> {
     pub total_time: f64,
     pub hit_rate: f64,
     pub miss_rate: f64,
+    pub direction_accuracy: f64,
+    pub target_accuracy: f64,
     pub energy_per_prediction: f64,
     pub energy_per_operation: f64,
     pub energy_per_hit: f64,
@@ -51,28 +59,41 @@ fn ratio(numerator: f64, denominator: f64) -> f64 {
 impl<'a> Report<'a> {
     /// Build one report from `trace` and `predictor`'s names and its `metric`.
     pub fn new(trace: &'a str, predictor: &'a str, metric: Metrics, config: Config) -> Self {
-        let misses = metric.predictions - metric.hits;
+        let misses = metric.total_predictions - metric.total_hits;
+        let direction_misses = metric.direction_predictions - metric.direction_hits;
+        let target_misses = metric.target_predictions - metric.target_hits;
 
         Self {
             trace_path: trace,
             predictor_name: predictor,
             configured_warmup: config.warmup,
             configured_speculations: config.speculations,
-            total_predictions: metric.predictions,
-            total_hits: metric.hits,
+            total_predictions: metric.total_predictions,
+            total_hits: metric.total_hits,
             total_misses: misses,
-            total_operations: metric.operations,
-            total_energy: metric.energy,
-            total_leakage: metric.leakage,
-            total_space: metric.space,
-            total_time: metric.time,
-            hit_rate: ratio(metric.hits as f64, metric.predictions as f64),
-            miss_rate: ratio(misses as f64, metric.predictions as f64),
-            energy_per_prediction: ratio(metric.energy, metric.predictions as f64),
-            energy_per_operation: ratio(metric.energy, metric.operations as f64),
-            energy_per_hit: ratio(metric.energy, metric.hits as f64),
-            energy_per_miss: ratio(metric.energy, misses as f64),
-            energy_per_area: ratio(metric.energy, metric.space),
+            total_direction_predictions: metric.direction_predictions,
+            total_direction_hits: metric.direction_hits,
+            total_direction_misses: direction_misses,
+            total_target_predictions: metric.target_predictions,
+            total_target_hits: metric.target_hits,
+            total_target_misses: target_misses,
+            total_operations: metric.total_operations,
+            total_energy: metric.total_energy,
+            total_leakage: metric.total_leakage,
+            total_space: metric.total_space,
+            total_time: metric.total_time,
+            hit_rate: ratio(metric.total_hits as f64, metric.total_predictions as f64),
+            miss_rate: ratio(misses as f64, metric.total_predictions as f64),
+            direction_accuracy: ratio(
+                metric.direction_hits as f64,
+                metric.direction_predictions as f64,
+            ),
+            target_accuracy: ratio(metric.target_hits as f64, metric.target_predictions as f64),
+            energy_per_prediction: ratio(metric.total_energy, metric.total_predictions as f64),
+            energy_per_operation: ratio(metric.total_energy, metric.total_operations as f64),
+            energy_per_hit: ratio(metric.total_energy, metric.total_hits as f64),
+            energy_per_miss: ratio(metric.total_energy, misses as f64),
+            energy_per_area: ratio(metric.total_energy, metric.total_space),
         }
     }
 }

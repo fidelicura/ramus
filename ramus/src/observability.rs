@@ -87,19 +87,27 @@ impl Ledger {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Metrics {
     /// Number of branches scored after warmup.
-    pub predictions: u64,
+    pub total_predictions: u64,
     /// Number of metered operations executed.
-    pub operations: u64,
-    /// Number of predictions with correct direction and, if taken, target.
-    pub hits: u64,
+    pub total_operations: u64,
+    /// Number of correct early next-PC predictions (direction and next address).
+    pub total_hits: u64,
+    /// Number of branches whose direction was scored.
+    pub direction_predictions: u64,
+    /// Number of branches with the correct direction.
+    pub direction_hits: u64,
+    /// Number of branches whose next address was scored.
+    pub target_predictions: u64,
+    /// Number of branches with the correct predicted next address.
+    pub target_hits: u64,
     /// Total switching energy charged, summed every time an operation runs.
-    pub energy: f64,
+    pub total_energy: f64,
     /// Total static space area of the distinct operations, summed once at usage of an operation.
-    pub space: f64,
+    pub total_space: f64,
     /// Total leakage energy accrued, ticked once per cycle for every distinct operation.
-    pub leakage: f64,
+    pub total_leakage: f64,
     /// Total work time charged, summed every time an operation runs.
-    pub time: f64,
+    pub total_time: f64,
 }
 
 impl Metrics {
@@ -125,17 +133,21 @@ impl Metrics {
         LEDGER.with(|cell| {
             let mut ledger = cell.borrow_mut();
             if ledger.charging {
-                ledger.metrics.leakage += ledger.leakage;
+                ledger.metrics.total_leakage += ledger.leakage;
             }
         });
     }
 
-    /// Record one prediction.
-    pub(crate) fn outcome(outcome: bool) {
+    /// Score one branch's direction and next address; `hits` records when both are correct.
+    pub(crate) fn prediction(direction_hit: bool, target_hit: bool) {
         LEDGER.with(|cell| {
             let mut ledger = cell.borrow_mut();
-            ledger.metrics.predictions += 1;
-            outcome.then(|| ledger.metrics.hits += 1);
+            ledger.metrics.total_predictions += 1;
+            ledger.metrics.direction_predictions += 1;
+            ledger.metrics.target_predictions += 1;
+            direction_hit.then(|| ledger.metrics.direction_hits += 1);
+            target_hit.then(|| ledger.metrics.target_hits += 1);
+            (direction_hit && target_hit).then(|| ledger.metrics.total_hits += 1);
         });
     }
 
@@ -171,12 +183,12 @@ impl Metrics {
                 return;
             }
 
-            ledger.metrics.energy += energy;
-            ledger.metrics.time += time;
-            ledger.metrics.operations += 1;
+            ledger.metrics.total_energy += energy;
+            ledger.metrics.total_time += time;
+            ledger.metrics.total_operations += 1;
 
             if ledger.charged.insert((operation, SIZE)) {
-                ledger.metrics.space += space;
+                ledger.metrics.total_space += space;
                 ledger.leakage += leakage;
             }
         });
@@ -191,7 +203,7 @@ impl Metrics {
     where
         P: Predictor<BITS>,
     {
-        LEDGER.with(|cell| cell.borrow_mut().metrics.space += predictor.size());
+        LEDGER.with(|cell| cell.borrow_mut().metrics.total_space += predictor.size());
     }
 
     /// Charge a `WAYS`-way multiplexer, modelled as `WAYS - 1` input selects.
@@ -344,15 +356,17 @@ mod tests {
     // clashing and restores the default cost table when it touches it.
 
     #[test]
-    fn outcome_tracks_hits_and_misses() {
+    fn prediction_tracks_independent_scores() {
         Metrics::reset();
-        Metrics::outcome(true); // Hit.
-        Metrics::outcome(false); // Miss.
-        Metrics::outcome(true); // Hit.
+        Metrics::prediction(true, true);
+        Metrics::prediction(false, false);
+        Metrics::prediction(true, false);
 
         let m = Metrics::reset();
-        assert_eq!(m.predictions, 3);
-        assert_eq!(m.hits, 2); // Misses: predictions - hits == 1.
+        assert_eq!(m.total_predictions, 3);
+        assert_eq!((m.direction_predictions, m.direction_hits), (3, 2));
+        assert_eq!((m.target_predictions, m.target_hits), (3, 1));
+        assert_eq!(m.total_hits, 1);
     }
 
     /// Price `wrapping_add` at `cost`, charge it `n` times, return the run's metrics.
@@ -374,7 +388,7 @@ mod tests {
             switching_energy: Some(5.0),
             ..Cost::free()
         };
-        assert_eq!(charge_n(cost, 1).energy, 5.0); // Hands back the total...
+        assert_eq!(charge_n(cost, 1).total_energy, 5.0); // Hands back the total...
         assert_eq!(Metrics::reset(), Metrics::default()); // ...and leaves it cleared.
     }
 
@@ -384,7 +398,7 @@ mod tests {
             switching_energy: Some(1.5),
             ..Cost::free()
         };
-        assert_eq!(charge_n(cost, 2).energy, 3.0);
+        assert_eq!(charge_n(cost, 2).total_energy, 3.0);
     }
 
     #[test]
@@ -395,8 +409,8 @@ mod tests {
             ..Cost::free()
         };
         let m = charge_n(cost, 4);
-        assert_eq!(m.energy, 4.0); // Energy is per execution.
-        assert_eq!(m.space, 2.0); // Area counted once, however often charged.
+        assert_eq!(m.total_energy, 4.0); // Energy is per execution.
+        assert_eq!(m.total_space, 2.0); // Area counted once, however often charged.
     }
 
     #[test]
@@ -420,7 +434,7 @@ mod tests {
         Metrics::tick();
 
         let m = Metrics::reset();
-        assert_eq!(m.leakage, 3.0); // 1.5 leakage * 2 ticks.
+        assert_eq!(m.total_leakage, 3.0); // 1.5 leakage * 2 ticks.
 
         Costs::set(Costs::default());
     }
@@ -442,7 +456,7 @@ mod tests {
         Metrics::tick(); // Dropped, not accrued.
 
         let m = Metrics::reset(); // `reset` restores metering.
-        assert_eq!(m.leakage, 0.0);
+        assert_eq!(m.total_leakage, 0.0);
 
         Costs::set(Costs::default());
     }
@@ -463,16 +477,16 @@ mod tests {
         Metrics::select::<4>(); // 4 inputs == 3 selects.
         Metrics::tick();
         let m = Metrics::reset();
-        assert_eq!(m.energy, 30.0); // 10 * 3.
-        assert_eq!(m.space, 12.0); // 4 * 3.
-        assert_eq!(m.leakage, 9.0); // 3 * 3, ticked once.
-        assert_eq!(m.time, 6.0); // 2 * 3.
+        assert_eq!(m.total_energy, 30.0); // 10 * 3.
+        assert_eq!(m.total_space, 12.0); // 4 * 3.
+        assert_eq!(m.total_leakage, 9.0); // 3 * 3, ticked once.
+        assert_eq!(m.total_time, 6.0); // 2 * 3.
 
         Metrics::select::<1>(); // Single input is free.
-        assert_eq!(Metrics::reset().energy, 0.0);
+        assert_eq!(Metrics::reset().total_energy, 0.0);
 
         Metrics::select::<0>(); // Saturating: no underflow.
-        assert_eq!(Metrics::reset().energy, 0.0);
+        assert_eq!(Metrics::reset().total_energy, 0.0);
 
         Costs::set(Costs::default());
     }
@@ -550,10 +564,10 @@ mod tests {
     #[test]
     fn free_charges_no_energy_space_or_leakage() {
         let m = charge_n(Cost::free(), 3);
-        assert_eq!(m.energy, 0.0);
-        assert_eq!(m.space, 0.0);
-        assert_eq!(m.leakage, 0.0);
-        assert_eq!(m.time, 0.0);
+        assert_eq!(m.total_energy, 0.0);
+        assert_eq!(m.total_space, 0.0);
+        assert_eq!(m.total_leakage, 0.0);
+        assert_eq!(m.total_time, 0.0);
     }
 
     #[test]
@@ -562,7 +576,7 @@ mod tests {
             work_time: Some(0.5),
             ..Cost::free()
         };
-        assert_eq!(charge_n(cost, 4).time, 2.0);
+        assert_eq!(charge_n(cost, 4).total_time, 2.0);
     }
 
     #[test]
@@ -580,12 +594,12 @@ mod tests {
         // Same size charged twice: one hardware instance, area counted once.
         Metrics::charge::<8>(Operation::wrapping_add, cost);
         Metrics::charge::<8>(Operation::wrapping_add, cost);
-        assert_eq!(Metrics::reset().space, 2.0);
+        assert_eq!(Metrics::reset().total_space, 2.0);
 
         // Different sizes of the same operation: two distinct instances, both counted.
         Metrics::charge::<8>(Operation::wrapping_add, cost);
         Metrics::charge::<64>(Operation::wrapping_add, cost);
-        assert_eq!(Metrics::reset().space, 4.0); // 2.0 (8-bit) + 2.0 (64-bit).
+        assert_eq!(Metrics::reset().total_space, 4.0); // 2.0 (8-bit) + 2.0 (64-bit).
 
         Costs::set(Costs::default());
     }
@@ -608,7 +622,7 @@ mod tests {
         Metrics::select::<8>(); // Different width: a distinct mux, area counted too (7 selects * 4.0).
 
         let m = Metrics::reset();
-        assert_eq!(m.space, 32.0); // 4.0 (2-way, scale 1) + 28.0 (8-way, scale 7), not 4.0 total.
+        assert_eq!(m.total_space, 32.0); // 4.0 (2-way, scale 1) + 28.0 (8-way, scale 7), not 4.0 total.
 
         Costs::set(Costs::default());
     }

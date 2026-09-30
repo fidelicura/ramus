@@ -44,18 +44,21 @@ many predictors/traces.
 
 ## Prediction
 
-`Predictor::predict(current, kind)` returns one `Prediction<BITS>` containing
+`Predictor::predict(current)` returns one `Prediction<BITS>` containing
 both `direction` and `target`. Every branch kind is predicted, scored, and passed
-to `update`; warmup and speculation apply to every branch as well.
+to `update`; warmup and speculation apply to every branch as well. Only the
+address is supplied to `predict`; branch kind is revealed during `update`.
 
-A hit requires the correct direction and, for a taken branch, the correct target.
-An unknown target (`target: None`) misses on a taken branch. For a correctly
-predicted untaken branch, the target is irrelevant. Scoring itself adds no
-hardware cost. Reports count one prediction per branch after warmup.
+A report separates direction accuracy, next-address accuracy, and early next-PC
+accuracy. Both direction and next address are scored for every CFI, regardless
+of kind or whether it is taken. `Info::next` is the actual next address: the
+target when taken, or fall-through when untaken. A missing predicted address
+(`target: None`) is an address miss. Scoring itself adds no hardware cost.
+Reports count one branch prediction per CFI after warmup.
 
 Arbiter's `--predictors smith_bimodal` combines 1024 two-bit direction counters
-with a tagged, direct-mapped target buffer. Conditional direction comes from
-the counters; other branch kinds predict taken. Taken branches train the target
+with a tagged, direct-mapped target buffer. Direction comes from
+the counters, which train on every branch kind. Taken branches train the target
 buffer. All tables contribute to storage and operation costs.
 
 ## Example
@@ -118,25 +121,24 @@ impl Bimodal {
 }
 
 impl Predictor<64> for Bimodal {
-    fn predict(&mut self, current: Address, kind: Kind) -> Prediction<64> {
+    fn predict(&mut self, current: Address) -> Prediction<64> {
         let index = Self::index(current);
         let counter = self.table[index];
         // Top bit of the 2-bit counter is the verdict: 2 or 3 => "taken".
-        let taken = kind != Kind::Conditional || (counter >> 1u8) == 1u8;
+        let taken = (counter >> 1u8) == 1u8;
         let hit = (self.valid[index] == 1u8) & (self.tags[index] == current);
         let target = self.targets[index];
         Prediction { direction: Direction::from(taken), target: hit.then_some(target) }
     }
 
-    fn update(&mut self, current: Address, kind: Kind, direction: Direction, next: Address) {
+    fn update(&mut self, current: Address, _kind: Kind, direction: Direction, next: Address) {
         let index = Self::index(current);
-        if kind == Kind::Conditional {
-            let counter = self.table[index];
-            self.table[index] = select!(direction => {
-                Direction::Taken => counter.saturating_add(1u8),
-                Direction::Untaken => counter.saturating_sub(1u8),
-            });
-        }
+        // Learn direction for every branch kind, including unconditional branches.
+        let counter = self.table[index];
+        self.table[index] = select!(direction => {
+            Direction::Taken => counter.saturating_add(1u8),
+            Direction::Untaken => counter.saturating_sub(1u8),
+        });
         if direction == Direction::Taken {
             self.tags[index] = current;
             self.targets[index] = next;
@@ -264,7 +266,7 @@ fn main() {
     println!("time:         {:.1}", metrics.time);        // Total work time charged over every metered execution.
 
     assert_eq!(metrics.predictions, 5);
-    assert_eq!(metrics.hits, 2);
+    assert_eq!(metrics.hits, 0);
 }
 
 ////////////////////////////////////////////////////////////////////////////////

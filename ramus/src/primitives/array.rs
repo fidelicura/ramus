@@ -109,7 +109,7 @@ mod tests {
         array[index] = Value::wrapping(3u16); // A write through `IndexMut`.
         let _ = array[index]; // A read through plain `Index`.
 
-        assert_eq!(Metrics::reset().energy, 9.0); // 2 reads * 2 + 1 write * 5.
+        assert_eq!(Metrics::reset().total_energy, 9.0); // 2 reads * 2 + 1 write * 5.
         Costs::set(Costs::default());
     }
 }

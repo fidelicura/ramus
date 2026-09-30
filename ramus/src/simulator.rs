@@ -25,8 +25,8 @@ use std::thread;
 /// A branch predictor under evaluation, over `BITS`-wide addresses.
 pub trait Predictor<const BITS: usize>: 'static {
     /// Predict both direction and target for every branch, before resolution.
-    /// Only the branch address and kind are known at prediction time.
-    fn predict(&mut self, current: Address<BITS>, kind: Kind) -> Prediction<BITS>;
+    /// Only the branch address is supplied at prediction time; kind is revealed by `update`.
+    fn predict(&mut self, current: Address<BITS>) -> Prediction<BITS>;
 
     /// Resolve a predicted branch, including warmup and target-buffer misses.
     /// `next` is the target if taken, the fall-through address otherwise.
@@ -53,8 +53,8 @@ pub trait Predictor<const BITS: usize>: 'static {
 /// This is what lets [`Simulator::run_many_predictors`] hold a heterogeneous
 /// `Vec` of differently-typed predictors behind trait objects.
 impl<const BITS: usize, P: Predictor<BITS> + ?Sized> Predictor<BITS> for Box<P> {
-    fn predict(&mut self, current: Address<BITS>, kind: Kind) -> Prediction<BITS> {
-        (**self).predict(current, kind)
+    fn predict(&mut self, current: Address<BITS>) -> Prediction<BITS> {
+        (**self).predict(current)
     }
 
     fn update(
@@ -174,23 +174,24 @@ impl<const BITS: usize> Queue<BITS> {
     where
         P: Predictor<BITS>,
     {
-        // 1. Predict using only the branch address and kind; the actual
-        // direction and next address stay hidden until `update`. Tick one
-        // cycle of leakage after the prediction's hardware operations.
-        let prediction = predictor.predict(info.address, info.kind);
+        // 1. Predict using only the branch address; kind, actual direction,
+        // and next address stay hidden until `update`. Tick one cycle of
+        // leakage after the prediction's hardware operations.
+        let prediction = predictor.predict(info.address);
         Metrics::tick();
 
         // 2. Score immediately: the trace already carries the answer, even
         // though the predictor has not received it yet. Warmup skips this
-        // step. A hit requires the correct direction and, if taken, target;
-        // a correctly predicted untaken branch needs no target.
+        // step. Every CFI's predicted direction and next address are scored
+        // independently; the combined hit requires both to be correct.
         if score {
-            // XXX: Compare raw addresses (`.0`) so checking correctness does
-            // not charge the predictor for a metered `Value` comparison.
-            let hit = prediction.direction == info.direction
-                && (info.direction == Direction::Untaken
-                    || prediction.target.map(|address| address.0) == Some(info.next.0));
-            Metrics::outcome(hit);
+            let direction_hit = prediction.direction == info.direction;
+            let target_hit = prediction
+                .target
+                // XXX: Compare raw addresses (`.0`) so checking correctness does
+                // not charge the predictor for a metered `Value` comparison.
+                .is_some_and(|target| target.0 == info.next.0);
+            Metrics::prediction(direction_hit, target_hit);
         }
 
         // 3. Queue the branch for training. If this exceeds the unresolved
@@ -449,7 +450,7 @@ mod tests {
     struct AlwaysTaken;
 
     impl Predictor<64> for AlwaysTaken {
-        fn predict(&mut self, _current: Address<64>, _kind: Kind) -> Prediction<64> {
+        fn predict(&mut self, _current: Address<64>) -> Prediction<64> {
             Prediction {
                 direction: Direction::Taken,
                 target: Some(Address::ZERO),
@@ -466,7 +467,7 @@ mod tests {
     struct Stateful<const AREA: usize>;
 
     impl<const AREA: usize> Predictor<64> for Stateful<AREA> {
-        fn predict(&mut self, _current: Address<64>, _kind: Kind) -> Prediction<64> {
+        fn predict(&mut self, _current: Address<64>) -> Prediction<64> {
             Prediction {
                 direction: Direction::Taken,
                 target: Some(Address::ZERO),
@@ -484,7 +485,7 @@ mod tests {
     struct OneAdd;
 
     impl Predictor<64> for OneAdd {
-        fn predict(&mut self, _current: Address<64>, _kind: Kind) -> Prediction<64> {
+        fn predict(&mut self, _current: Address<64>) -> Prediction<64> {
             let _ = crate::Value::<8>::ZERO.wrapping_add(1u8);
             Prediction {
                 direction: Direction::Taken,
@@ -513,7 +514,7 @@ mod tests {
             updates: Rc<RefCell<Vec<Kind>>>,
         }
         impl Predictor<64> for Target {
-            fn predict(&mut self, _: Address<64>, _: Kind) -> Prediction<64> {
+            fn predict(&mut self, _: Address<64>) -> Prediction<64> {
                 Prediction {
                     direction: Direction::Taken,
                     target: self.target,
@@ -586,42 +587,134 @@ mod tests {
                     speculations,
                 },
             );
-            assert_eq!((metrics.predictions, metrics.hits), (predictions, hits));
-            assert_eq!(metrics.energy, (6 - warmup) as f64);
+            assert_eq!(
+                (metrics.total_predictions, metrics.total_hits),
+                (predictions, hits)
+            );
+            assert_eq!(metrics.total_energy, (6 - warmup) as f64);
             assert_eq!(*updates.borrow(), kinds); // Includes boundary and final drains.
         }
     }
 
     #[test]
-    fn hit_requires_direction_and_taken_target() {
+    fn score_direction_target_and_early_next_pc_separately() {
         struct Fixed(Prediction<64>);
         impl Predictor<64> for Fixed {
-            fn predict(&mut self, _: Address<64>, _: Kind) -> Prediction<64> {
+            fn predict(&mut self, _: Address<64>) -> Prediction<64> {
                 self.0
             }
             fn size(&self) -> f64 {
                 0.0
             }
         }
-        for (predicted, target, actual, hit) in [
-            (Direction::Taken, Some(0), Direction::Taken, true),
-            (Direction::Taken, Some(4), Direction::Taken, false),
-            (Direction::Taken, None, Direction::Taken, false),
-            (Direction::Untaken, Some(0), Direction::Taken, false),
-            (Direction::Taken, Some(0), Direction::Untaken, false),
-            (Direction::Untaken, None, Direction::Untaken, true),
-            (Direction::Untaken, Some(4), Direction::Untaken, true),
+        for (predicted, target, actual, next, dir_hit, target_hit, next_pc_hit) in [
+            (
+                Direction::Taken,
+                Some(0),
+                Direction::Taken,
+                0,
+                true,
+                true,
+                true,
+            ),
+            (
+                Direction::Taken,
+                Some(4),
+                Direction::Taken,
+                0,
+                true,
+                false,
+                false,
+            ),
+            (
+                Direction::Taken,
+                None,
+                Direction::Taken,
+                0,
+                true,
+                false,
+                false,
+            ),
+            (
+                Direction::Untaken,
+                Some(0),
+                Direction::Taken,
+                0,
+                false,
+                true,
+                false,
+            ),
+            (
+                Direction::Taken,
+                Some(4),
+                Direction::Untaken,
+                4,
+                false,
+                true,
+                false,
+            ),
+            (
+                Direction::Untaken,
+                None,
+                Direction::Untaken,
+                4,
+                true,
+                false,
+                false,
+            ),
+            (
+                Direction::Untaken,
+                Some(4),
+                Direction::Untaken,
+                4,
+                true,
+                true,
+                true,
+            ),
         ] {
-            let source = VecDeque::from([branch(Kind::Conditional, actual)]);
+            let mut info = branch(Kind::Conditional, actual);
+            info.next = Address::new(next);
+            let source = VecDeque::from([info]);
             let predictor = Fixed(Prediction {
                 direction: predicted,
                 target: target.map(Address::new),
             });
             let metrics = Simulator::run_one(source, predictor, Costs::default(), Config::none());
-            assert_eq!(metrics.predictions, 1);
-            assert_eq!(metrics.hits, u64::from(hit));
-            assert_eq!(metrics.operations, 0);
+            assert_eq!(metrics.total_predictions, 1);
+            assert_eq!(metrics.direction_predictions, 1);
+            assert_eq!(metrics.direction_hits, u64::from(dir_hit));
+            assert_eq!(metrics.target_predictions, 1);
+            assert_eq!(metrics.target_hits, u64::from(target_hit));
+            assert_eq!(metrics.total_hits, u64::from(next_pc_hit));
+            assert_eq!(metrics.total_operations, 0);
         }
+    }
+
+    #[test]
+    fn unconditional_cfi_scores_direction_and_next_address() {
+        struct Fixed(Prediction<64>);
+        impl Predictor<64> for Fixed {
+            fn predict(&mut self, _: Address<64>) -> Prediction<64> {
+                self.0
+            }
+            fn size(&self) -> f64 {
+                0.0
+            }
+        }
+
+        let source = VecDeque::from([branch(Kind::UnconditionalDirect, Direction::Taken)]);
+        let predictor = Fixed(Prediction {
+            direction: Direction::Untaken,
+            target: Some(Address::new(0)),
+        });
+        let metrics = Simulator::run_one(source, predictor, Costs::default(), Config::none());
+        assert_eq!(metrics.total_predictions, 1);
+        assert_eq!(
+            (metrics.direction_predictions, metrics.direction_hits),
+            (1, 0)
+        );
+        assert_eq!((metrics.target_predictions, metrics.target_hits), (1, 1));
+        assert_eq!(metrics.total_hits, 0);
     }
 
     #[test]
@@ -636,8 +729,8 @@ mod tests {
         let config = Config::none();
 
         let metrics = Simulator::run_one(source, predictor, costs, config);
-        assert_eq!(metrics.predictions, 3);
-        assert_eq!(metrics.hits, 2); // Misses: predictions - hits == 1.
+        assert_eq!(metrics.total_predictions, 3);
+        assert_eq!(metrics.total_hits, 2); // Misses: predictions - hits == 1.
     }
 
     #[test]
@@ -657,8 +750,8 @@ mod tests {
         };
 
         let metrics = Simulator::run_one(source, predictor, costs, config);
-        assert_eq!(metrics.predictions, 1); // Only the post-warmup record scored.
-        assert_eq!(metrics.hits, 1);
+        assert_eq!(metrics.total_predictions, 1); // Only the post-warmup record scored.
+        assert_eq!(metrics.total_hits, 1);
     }
 
     #[test]
@@ -709,7 +802,7 @@ mod tests {
                 speculations: 0,
             },
         );
-        assert_eq!(off.energy, 1.0);
+        assert_eq!(off.total_energy, 1.0);
 
         // charge: true -> all three adds metered, even the warmed ones.
         let on = Simulator::run_one(
@@ -722,7 +815,7 @@ mod tests {
                 speculations: 0,
             },
         );
-        assert_eq!(on.energy, 3.0);
+        assert_eq!(on.total_energy, 3.0);
     }
 
     #[test]
@@ -745,7 +838,7 @@ mod tests {
         let config = Config::none();
 
         let metrics = Simulator::run_one(source, predictor, costs, config);
-        assert_eq!(metrics.space, 8.0); // the predictor's reported state area
+        assert_eq!(metrics.total_space, 8.0); // the predictor's reported state area
     }
 
     #[test]
@@ -771,7 +864,11 @@ mod tests {
         // Each predictor sees its own clone of the source, scoring every branch.
         let metrics = Simulator::run_many_predictors(source, predictors, costs, config);
         assert_eq!(metrics.len(), 2);
-        assert!(metrics.iter().all(|m| m.predictions == 3 && m.hits == 2));
+        assert!(
+            metrics
+                .iter()
+                .all(|m| m.total_predictions == 3 && m.total_hits == 2)
+        );
     }
 
     #[test]
@@ -801,7 +898,11 @@ mod tests {
         // Each source trains its own clone of the predictor, scoring all conditionals.
         let metrics = Simulator::run_many_sources(sources, predictor, costs, config);
         assert_eq!(metrics.len(), 3);
-        assert!(metrics.iter().all(|m| m.predictions == 2 && m.hits == 1));
+        assert!(
+            metrics
+                .iter()
+                .all(|m| m.total_predictions == 2 && m.total_hits == 1)
+        );
     }
 
     #[cfg(feature = "parallel")]
@@ -810,7 +911,7 @@ mod tests {
     fn run_many_predictors_propagates_a_panicking_predictor() {
         struct Panics;
         impl Predictor<64> for Panics {
-            fn predict(&mut self, _current: Address<64>, _kind: Kind) -> Prediction<64> {
+            fn predict(&mut self, _current: Address<64>) -> Prediction<64> {
                 panic!("boom");
             }
 
@@ -850,7 +951,7 @@ mod tests {
     struct LastDirection(Direction);
 
     impl Predictor<64> for LastDirection {
-        fn predict(&mut self, _current: Address<64>, _kind: Kind) -> Prediction<64> {
+        fn predict(&mut self, _current: Address<64>) -> Prediction<64> {
             Prediction {
                 direction: self.0,
                 target: Some(Address::ZERO),
@@ -886,8 +987,8 @@ mod tests {
 
         // Untaken->miss(Taken), Taken->miss(Untaken), Untaken->miss(Taken), Taken->hit(Taken).
         let metrics = Simulator::run_one(source, predictor, costs, config);
-        assert_eq!(metrics.predictions, 4);
-        assert_eq!(metrics.hits, 1);
+        assert_eq!(metrics.total_predictions, 4);
+        assert_eq!(metrics.total_hits, 1);
     }
 
     #[test]
@@ -910,8 +1011,8 @@ mod tests {
         // hit); B3 still predicts off Untaken (miss) which evicts B1, training
         // Taken; B4 then predicts off that Taken (hit) - hits == 2, not 1.
         let metrics = Simulator::run_one(source, predictor, costs, config);
-        assert_eq!(metrics.predictions, 4);
-        assert_eq!(metrics.hits, 2);
+        assert_eq!(metrics.total_predictions, 4);
+        assert_eq!(metrics.total_hits, 2);
     }
 
     /// Charges a priced op in `update`, not `predict`, so its energy only
@@ -920,7 +1021,7 @@ mod tests {
     struct ChargeOnUpdate;
 
     impl Predictor<64> for ChargeOnUpdate {
-        fn predict(&mut self, _current: Address<64>, _kind: Kind) -> Prediction<64> {
+        fn predict(&mut self, _current: Address<64>) -> Prediction<64> {
             Prediction {
                 direction: Direction::Taken,
                 target: Some(Address::ZERO),
@@ -964,7 +1065,7 @@ mod tests {
         };
 
         let metrics = Simulator::run_one(source, ChargeOnUpdate, costs, config);
-        assert_eq!(metrics.energy, 2.0);
+        assert_eq!(metrics.total_energy, 2.0);
     }
 
     /// Logs `"predict"`/`"update"` tags into a shared log, so call order
@@ -973,7 +1074,7 @@ mod tests {
     struct Logger(Rc<RefCell<Vec<&'static str>>>);
 
     impl Predictor<64> for Logger {
-        fn predict(&mut self, _current: Address<64>, _kind: Kind) -> Prediction<64> {
+        fn predict(&mut self, _current: Address<64>) -> Prediction<64> {
             self.0.borrow_mut().push("predict");
             Prediction {
                 direction: Direction::Taken,

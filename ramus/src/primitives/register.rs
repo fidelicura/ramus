@@ -96,7 +96,7 @@ mod tests {
         *register = Value::wrapping(3u16); // A write through `DerefMut`.
         let _ = *register; // A read through `Deref`.
 
-        assert_eq!(Metrics::reset().energy, 9.0); // 2 reads * 2 + 1 write * 5.
+        assert_eq!(Metrics::reset().total_energy, 9.0); // 2 reads * 2 + 1 write * 5.
         Costs::set(Costs::default());
     }
 }

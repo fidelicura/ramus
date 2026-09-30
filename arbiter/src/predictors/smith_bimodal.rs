@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::predictors::Address;
-use ramus::{Kind, Prediction, Array, Direction, Predictor, Value, select};
+use ramus::{Array, Direction, Kind, Prediction, Predictor, Value, select};
 
 /// Bimodal direction counters plus a tagged, direct-mapped target buffer.
 #[derive(Default)]
@@ -36,35 +36,37 @@ impl SmithBimodal {
 
     /// Map a branch address to its bucket index.
     fn index(address: Address) -> Value<64> {
-        // Instructions are 4-byte aligned, so the low 2 bits are always zero
+        // Instructions are 4-byte aligned, so the lowest 2 bits are always zero
         // and carry no information. Drop them first so neighbouring branches
         // don't all collide into the same bucket.
         let folded = address >> 2u8;
-        // Keep only the low 10 bits => an index in 0..1024.
+        // Keep only the lowest 10 bits => an index in 0..2^10 (0..1024).
         folded & Self::MASK
     }
 }
 
 impl Predictor<64> for SmithBimodal {
-    fn predict(&mut self, current: Address, kind: Kind) -> Prediction<64> {
+    fn predict(&mut self, current: Address) -> Prediction<64> {
         let index = Self::index(current);
         let counter = self.table[index];
         // Top bit of the 2-bit counter is the verdict: 2 or 3 => "taken".
-        let taken = kind != Kind::Conditional || (counter >> 1u8) == 1u8;
+        let taken = (counter >> 1u8) == 1u8;
         let hit = (self.valid[index] == 1u8) & (self.tags[index] == current);
         let target = self.targets[index];
-        Prediction { direction: Direction::from(taken), target: hit.then_some(target) }
+        Prediction {
+            direction: Direction::from(taken),
+            target: hit.then_some(target),
+        }
     }
 
-    fn update(&mut self, current: Address, kind: Kind, direction: Direction, next: Address) {
+    fn update(&mut self, current: Address, _kind: Kind, direction: Direction, next: Address) {
         let index = Self::index(current);
-        if kind == Kind::Conditional {
-            let counter = self.table[index];
-            self.table[index] = select!(direction => {
-                Direction::Taken => counter.saturating_add(1u8),
-                Direction::Untaken => counter.saturating_sub(1u8),
-            });
-        }
+        // Learn direction for every branch kind, including unconditional branches.
+        let counter = self.table[index];
+        self.table[index] = select!(direction => {
+            Direction::Taken => counter.saturating_add(1u8),
+            Direction::Untaken => counter.saturating_sub(1u8),
+        });
         if direction == Direction::Taken {
             self.tags[index] = current;
             self.targets[index] = next;
@@ -87,29 +89,44 @@ mod tests {
 
     struct Trace(VecDeque<Info<64>>);
     impl Source<64> for Trace {
-        fn fetch(&mut self) -> Option<Info<64>> { self.0.pop_front() }
+        fn fetch(&mut self) -> Option<Info<64>> {
+            self.0.pop_front()
+        }
     }
 
     #[test]
     fn combined_direction_and_target_buffer() {
         let branch = |address, kind, direction, next| Info {
-            address: Value::new(address), kind, direction, next: Value::new(next),
+            address: Value::new(address),
+            kind,
+            direction,
+            next: Value::new(next),
         };
         let trace = Trace(VecDeque::from([
             branch(0, Kind::UnconditionalDirect, Direction::Taken, 0), // Cold zero target: miss.
-            branch(0, Kind::UnconditionalDirect, Direction::Taken, 0), // Hit.
-            branch(0, Kind::Conditional, Direction::Untaken, 4), // Cold direction: hit.
-            branch(0, Kind::UnconditionalDirect, Direction::Taken, 0), // Target preserved: hit.
-            branch(4096, Kind::CallIndirect, Direction::Taken, 8), // Collision: miss.
-            branch(0, Kind::Return, Direction::Taken, 0), // Evicted: miss.
-            branch(0, Kind::Return, Direction::Taken, 16), // Changed target: miss.
-            branch(0, Kind::Return, Direction::Taken, 16), // New target: hit.
-            branch(0, Kind::Conditional, Direction::Taken, 16), // Counter 0: wrong direction.
-            branch(0, Kind::Conditional, Direction::Taken, 16), // Counter 1: wrong direction.
-            branch(0, Kind::Conditional, Direction::Taken, 16), // Counter 2: hit.
+            branch(0, Kind::UnconditionalDirect, Direction::Taken, 0), // Counter 1: wrong direction.
+            branch(0, Kind::Conditional, Direction::Untaken, 4), // Counter 2: wrong direction.
+            branch(0, Kind::UnconditionalDirect, Direction::Taken, 0), // Counter 1: wrong direction; target preserved.
+            branch(4096, Kind::CallIndirect, Direction::Taken, 8),     // Collision: miss.
+            branch(0, Kind::Return, Direction::Taken, 0),              // Evicted: miss.
+            branch(0, Kind::Return, Direction::Taken, 16),             // Changed target: miss.
+            branch(0, Kind::Return, Direction::Taken, 16),             // New target: hit.
+            branch(0, Kind::Conditional, Direction::Taken, 16), // Learned direction and target: hit.
+            branch(0, Kind::Conditional, Direction::Taken, 16), // Saturated counter: hit.
+            branch(0, Kind::Conditional, Direction::Taken, 16), // Saturated counter: hit.
         ]));
-        let metrics = Simulator::run_one(trace, SmithBimodal::default(), Costs::free(), Config::none());
-        assert_eq!((metrics.predictions, metrics.hits), (11, 5));
-        assert_eq!(metrics.space, 131.0 * 1024.0);
+        let metrics = Simulator::run_one(
+            trace,
+            SmithBimodal::default(),
+            Costs::free(),
+            Config::none(),
+        );
+        assert_eq!((metrics.total_predictions, metrics.total_hits), (11, 4));
+        assert_eq!(
+            (metrics.direction_predictions, metrics.direction_hits),
+            (11, 7)
+        );
+        assert_eq!((metrics.target_predictions, metrics.target_hits), (11, 6));
+        assert_eq!(metrics.total_space, 131.0 * 1024.0);
     }
 }
