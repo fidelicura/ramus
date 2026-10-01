@@ -18,6 +18,7 @@ use serde::Serialize;
 /// One predictor's run over one trace, raw totals plus the ratios derived from them.
 #[derive(Serialize)]
 pub struct Report<'a> {
+    pub run_identifier: String,
     pub trace_path: &'a str,
     pub predictor_name: &'a str,
     pub configured_warmup: u64,
@@ -64,6 +65,8 @@ impl<'a> Report<'a> {
         let target_misses = metric.target_predictions - metric.target_hits;
 
         Self {
+            run_identifier: petname::petname(3, "-")
+                .expect("petname's built-in English word lists are non-empty"),
             trace_path: trace,
             predictor_name: predictor,
             configured_warmup: config.warmup,

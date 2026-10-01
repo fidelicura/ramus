@@ -69,6 +69,9 @@ pub struct Prediction<const BITS: usize> {
 /// What kind of branch a record is.
 ///
 /// Every kind is predicted, scored, and resolved through the same predictor.
+//
+// XXX: The starting discriminant is intentionally set to 0.
+// This avoids clashing with `Value::ZERO` as an uninitialized state.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy)]
 pub enum Kind {

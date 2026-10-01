@@ -11,6 +11,12 @@
     "area_space": 20.0192,
     "work_time": 0.449180
   },
+  "wrapping_add": {
+    "switching_energy": 0.048738,
+    "leakage_energy": 0.007299295,
+    "area_space": 20.0192,
+    "work_time": 0.449180
+  },
   "wrapping_shl": {
     "switching_energy": 0.065897,
     "leakage_energy": 0.004027789,

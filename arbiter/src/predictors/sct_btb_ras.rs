@@ -50,9 +50,13 @@ impl SCT {
     fn update(&mut self, address: Address, direction: Direction) {
         let index = Self::index(address);
         let counter = self.table[index];
-        self.table[index] = select!(direction => {
-            Direction::Taken => counter.saturating_add(1u8),
-            Direction::Untaken => counter.saturating_sub(1u8),
+        let taken = select!(direction => {
+            Direction::Taken => true,
+            Direction::Untaken => false,
+        });
+        self.table[index] = select!(taken => {
+            true => counter | ((counter << 1u8) & 0b10u8) | 0b01u8,
+            false => counter & ((counter >> 1u8) | 0b01u8),
         });
     }
 
@@ -64,6 +68,7 @@ impl SCT {
 #[derive(Default)]
 struct BTB {
     buffer: Array<64, { Self::LENGTH }>,
+    valid: Array<1, { Self::LENGTH }>,
 } // Target: *b*ranch *t*arget *b*uffer.
 
 impl BTB {
@@ -73,7 +78,7 @@ impl BTB {
     const LENGTH: usize = 2usize.pow(12);
 
     /// A power-of-two table size lets us fold an address into a bucket with a
-    /// single AND instead of a `%`: `addr & (LENGTH - 1)` is the bottom 10 bits.
+    /// single AND instead of a `%`: `addr & (LENGTH - 1)` is the bottom 12 bits.
     const MASK: u32 = Self::LENGTH as u32 - 1;
 
     /// Map a branch address to its bucket index.
@@ -82,28 +87,33 @@ impl BTB {
         // and carry no information. Drop them first so neighbouring branches
         // don't all collide into the same bucket.
         let folded = address >> 2u8;
-        // Keep only the lowest 10 bits => an index in 0..2^10 (0..1024).
+        // Keep only the lowest 12 bits => an index in 0..2^12 (0..4096).
         folded & Self::MASK
     }
 
     fn predict(&self, address: Address) -> Target {
-        self.buffer[Self::index(address)]
+        let index = Self::index(address);
+        select!(self.valid[index] == 1u8 => {
+            true => self.buffer[index],
+            false => address.wrapping_add(4u8),
+        })
     }
 
     fn update(&mut self, address: Address, target: Target) {
         let index = Self::index(address);
         self.buffer[index] = target;
+        self.valid[index] = Value::new(1);
     }
 
     fn size(&self) -> f64 {
-        Array::<64, { Self::LENGTH }>::SIZE
+        Array::<64, { Self::LENGTH }>::SIZE + Array::<1, { Self::LENGTH }>::SIZE
     }
 }
 
 #[derive(Default)]
 struct RAS {
     stack: Array<64, { Self::LENGTH }>,
-    index: Value<5>,
+    count: Value<6>,
 } // Stack: *r*eturn *a*ddress *s*tack.
 
 impl RAS {
@@ -113,17 +123,30 @@ impl RAS {
     const LENGTH: usize = 2usize.pow(5);
 
     fn push(&mut self, target: Target) {
-        self.index = self.index.saturating_add(1u8);
-        self.stack[self.index] = target;
+        select!(self.count < Self::LENGTH as u8 => {
+            true => {
+                self.stack[self.count] = target;
+                self.count = self.count.saturating_add(1u8);
+            },
+            false => {},
+        });
     }
 
     fn pop(&mut self) {
-        self.stack[self.index] = Target::ZERO;
-        self.index = self.index.saturating_sub(1u8);
+        select!(self.count > 0u8 => {
+            true => {
+                self.count = self.count.saturating_sub(1u8);
+                self.stack[self.count] = Target::ZERO;
+            },
+            false => {},
+        });
     }
 
     fn peek(&self) -> Target {
-        self.stack[self.index]
+        select!(self.count > 0u8 => {
+            true => self.stack[self.count.saturating_sub(1u8)],
+            false => Target::ZERO,
+        })
     }
 
     fn update(&mut self, address: Address, kind: Kind) {
@@ -135,24 +158,31 @@ impl RAS {
     }
 
     fn size(&self) -> f64 {
-        Array::<64, { Self::LENGTH }>::SIZE + Value::<5>::SIZE
+        Array::<64, { Self::LENGTH }>::SIZE + Value::<6>::SIZE
     }
 }
 
 #[derive(Default)]
 struct Meta {
     table: Array<3, { BTB::LENGTH }>,
+    valid: Array<1, { BTB::LENGTH }>,
 }
 
 impl Meta {
-    fn lookup(&self, address: Address) -> Kind {
+    fn lookup(&self, address: Address) -> Option<Kind> {
         let index = BTB::index(address);
-        Kind::from(self.table[index])
+        let valid = self.valid[index] == 1u8;
+        valid.then(|| Kind::from(self.table[index]))
     }
 
     fn update(&mut self, address: Address, kind: Kind) {
         let index = BTB::index(address);
-        self.table[index] = kind.into();
+        self.table[index] = Value::from(kind);
+        self.valid[index] = Value::new(1);
+    }
+
+    fn size(&self) -> f64 {
+        Array::<3, { BTB::LENGTH }>::SIZE + Array::<1, { BTB::LENGTH }>::SIZE
     }
 }
 
@@ -167,28 +197,34 @@ pub struct Predictor {
 impl ramus::Predictor<64> for Predictor {
     fn predict(&mut self, address: Address) -> Prediction<64> {
         let kind = self.meta.lookup(address);
-        Prediction {
-            direction: self.sct.predict(address),
-            target: select!(kind => {
-                Kind::Return => self.ras.peek(),
-                _ => self.btb.predict(address),
-            }),
-        }
+        select!(kind => {
+            Some(kind) => Prediction {
+                direction: self.sct.predict(address),
+                target: select!(kind => {
+                    Kind::Return => self.ras.peek(),
+                    _ => self.btb.predict(address),
+                }),
+            },
+            None => Prediction {
+                direction: self.sct.predict(address),
+                target: self.btb.predict(address),
+            },
+        })
     }
 
     fn update(&mut self, current: Address, kind: Kind, direction: Direction, next: Address) {
+        self.sct.update(current, direction);
         self.btb.update(current, next);
+        self.meta.update(current, kind);
         select!(kind => {
-            Kind::ConditionalDirect => self.sct.update(current, direction),
-            Kind::UnconditionalDirect => self.meta.update(current, kind),
-            Kind::UnconditionalIndirect => self.meta.update(current, kind),
-            Kind::CallDirect => self.ras.update(current, kind),
-            Kind::CallIndirect => self.ras.update(current, kind),
+            Kind::CallDirect => self.ras.update(next, kind),
+            Kind::CallIndirect => self.ras.update(next, kind),
             Kind::Return => self.ras.update(current, kind),
+            _ => {},
         });
     }
 
     fn size(&self) -> f64 {
-        self.sct.size() + self.btb.size() + self.ras.size()
+        self.sct.size() + self.btb.size() + self.ras.size() + self.meta.size()
     }
 }
