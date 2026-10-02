@@ -35,18 +35,3 @@ name = "ramus"
 readme = "README.md"
 repository = "https://github.com/fidelicura/ramus"
 version = "0.0.0"
-
-# SOURCE: <https://doc.rust-lang.org/cargo/reference/profiles.html#bench>
-[profile.bench]
-inherits = "release"
-debug = "full"
-
-# SOURCE: <https://doc.rust-lang.org/cargo/reference/profiles.html#dev>
-[profile.dev]
-debug = 0
-
-# SOURCE: <https://doc.rust-lang.org/cargo/reference/profiles.html#release>
-[profile.release]
-codegen-units = 1
-lto = "fat"
-overflow-checks = true

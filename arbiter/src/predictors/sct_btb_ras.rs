@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::predictors::{Address, Target};
-use ramus::{Array, Direction, Kind, Prediction, Value, select};
+use ramus::{Array, Direction, Kind, Prediction, Value, overlap, select};
 
 #[derive(Default)]
 struct SCT {
@@ -50,13 +50,9 @@ impl SCT {
     fn update(&mut self, address: Address, direction: Direction) {
         let index = Self::index(address);
         let counter = self.table[index];
-        let taken = select!(direction => {
-            Direction::Taken => true,
-            Direction::Untaken => false,
-        });
-        self.table[index] = select!(taken => {
-            true => counter | ((counter << 1u8) & 0b10u8) | 0b01u8,
-            false => counter & ((counter >> 1u8) | 0b01u8),
+        self.table[index] = select!(direction => {
+            Direction::Taken => counter.saturating_add(1u8),
+            Direction::Untaken => counter.saturating_sub(1u8),
         });
     }
 
@@ -101,8 +97,10 @@ impl BTB {
 
     fn update(&mut self, address: Address, target: Target) {
         let index = Self::index(address);
-        self.buffer[index] = target;
-        self.valid[index] = Value::new(1);
+        overlap! {
+            self.buffer[index] = target;
+            self.valid[index] = Value::new(1);
+        };
     }
 
     fn size(&self) -> f64 {
@@ -142,10 +140,10 @@ impl RAS {
         });
     }
 
-    fn peek(&self) -> Target {
+    fn peek(&self) -> Option<Target> {
         select!(self.count > 0u8 => {
-            true => self.stack[self.count.saturating_sub(1u8)],
-            false => Target::ZERO,
+            true => Some(self.stack[self.count.saturating_sub(1u8)]),
+            false => None,
         })
     }
 
@@ -196,32 +194,40 @@ pub struct Predictor {
 
 impl ramus::Predictor<64> for Predictor {
     fn predict(&mut self, address: Address) -> Prediction<64> {
-        let kind = self.meta.lookup(address);
-        select!(kind => {
-            Some(kind) => Prediction {
-                direction: self.sct.predict(address),
-                target: select!(kind => {
-                    Kind::Return => self.ras.peek(),
-                    _ => self.btb.predict(address),
+        let (kind, direction, guess_btb, guess_ras) = overlap! {(
+            self.meta.lookup(address),
+            self.sct.predict(address),
+            self.btb.predict(address),
+            self.ras.peek(),
+        )};
+
+        let target = select!(kind => {
+            Some(kind) => select!(kind => {
+                Kind::Return => select!(guess_ras => {
+                    Some(guess_ras) => guess_ras,
+                    None => guess_btb,
                 }),
-            },
-            None => Prediction {
-                direction: self.sct.predict(address),
-                target: self.btb.predict(address),
-            },
-        })
+                _ => guess_btb,
+            }),
+            None => guess_btb,
+        });
+
+        Prediction { direction, target }
     }
 
     fn update(&mut self, current: Address, kind: Kind, direction: Direction, next: Address) {
+        select!(direction => {
+            Direction::Taken => self.btb.update(current, next),
+            Direction::Untaken => {},
+        });
         self.sct.update(current, direction);
-        self.btb.update(current, next);
-        self.meta.update(current, kind);
         select!(kind => {
             Kind::CallDirect => self.ras.update(next, kind),
             Kind::CallIndirect => self.ras.update(next, kind),
             Kind::Return => self.ras.update(current, kind),
             _ => {},
         });
+        self.meta.update(current, kind);
     }
 
     fn size(&self) -> f64 {

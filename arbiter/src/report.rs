@@ -59,14 +59,22 @@ fn ratio(numerator: f64, denominator: f64) -> f64 {
 
 impl<'a> Report<'a> {
     /// Build one report from `trace` and `predictor`'s names and its `metric`.
-    pub fn new(trace: &'a str, predictor: &'a str, metric: Metrics, config: Config) -> Self {
+    pub fn new(
+        trace: &'a str,
+        predictor: &'a str,
+        metric: Metrics,
+        config: Config,
+        name: Option<&str>,
+    ) -> Self {
         let misses = metric.total_predictions - metric.total_hits;
         let direction_misses = metric.direction_predictions - metric.direction_hits;
         let target_misses = metric.target_predictions - metric.target_hits;
 
         Self {
-            run_identifier: petname::petname(3, "-")
-                .expect("petname's built-in English word lists are non-empty"),
+            run_identifier: name.map_or_else(
+                || petname::petname(3, "-").expect("builtin word lists should not be empty"),
+                str::to_owned,
+            ),
             trace_path: trace,
             predictor_name: predictor,
             configured_warmup: config.warmup,
@@ -99,4 +107,103 @@ impl<'a> Report<'a> {
             energy_per_area: ratio(metric.total_energy, metric.total_space),
         }
     }
+}
+
+pub fn format_ascii(reports: &[Report<'_>]) -> String {
+    if reports.is_empty() {
+        return "No reports.".to_owned();
+    }
+
+    reports
+        .iter()
+        .map(format_report_ascii)
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn format_report_ascii(report: &Report<'_>) -> String {
+    let metadata = [
+        ("Run identifier", report.run_identifier.clone()),
+        ("Trace path", report.trace_path.to_owned()),
+        ("Predictor name", report.predictor_name.to_owned()),
+        ("Configured warmup", report.configured_warmup.to_string()),
+        (
+            "Configured speculations",
+            report.configured_speculations.to_string(),
+        ),
+    ];
+    let overall = [
+        ("Total predictions", report.total_predictions.to_string()),
+        ("Total hits", report.total_hits.to_string()),
+        ("Total misses", report.total_misses.to_string()),
+        ("Hit rate", format!("{:.2}%", report.hit_rate * 100.0)),
+        ("Miss rate", format!("{:.2}%", report.miss_rate * 100.0)),
+    ];
+    let direction = [
+        (
+            "Direction predictions",
+            report.total_direction_predictions.to_string(),
+        ),
+        ("Direction hits", report.total_direction_hits.to_string()),
+        (
+            "Direction misses",
+            report.total_direction_misses.to_string(),
+        ),
+        (
+            "Direction accuracy",
+            format!("{:.2}%", report.direction_accuracy * 100.0),
+        ),
+    ];
+    let target = [
+        (
+            "Target predictions",
+            report.total_target_predictions.to_string(),
+        ),
+        ("Target hits", report.total_target_hits.to_string()),
+        ("Target misses", report.total_target_misses.to_string()),
+        (
+            "Target accuracy",
+            format!("{:.2}%", report.target_accuracy * 100.0),
+        ),
+    ];
+    let resources = [
+        ("Total operations", report.total_operations.to_string()),
+        ("Total energy", format!("{:.6}", report.total_energy)),
+        ("Total leakage", format!("{:.6}", report.total_leakage)),
+        ("Total area", format!("{:.6}", report.total_space)),
+        ("Total time", format!("{:.6}", report.total_time)),
+        (
+            "Energy/prediction",
+            format!("{:.6}", report.energy_per_prediction),
+        ),
+        (
+            "Energy/operation",
+            format!("{:.6}", report.energy_per_operation),
+        ),
+        ("Energy/hit", format!("{:.6}", report.energy_per_hit)),
+        ("Energy/miss", format!("{:.6}", report.energy_per_miss)),
+        ("Energy/area", format!("{:.6}", report.energy_per_area)),
+    ];
+
+    let format = |rows: &[(&str, String)]| {
+        let label_width = rows.iter().map(|(label, _)| label.len()).max().unwrap_or(0);
+        let lines = rows
+            .iter()
+            .map(|(label, value)| format!("{label:<label_width$} : {value}"))
+            .collect::<Vec<_>>();
+        let width = lines.iter().map(String::len).max().unwrap_or(0);
+        let border = format!("+{}+", "-".repeat(width + 2));
+        let mut output = vec![border.clone()];
+        output.extend(lines.iter().map(|line| format!("| {line:<width$} |")));
+        output.push(border);
+        output.join("\n")
+    };
+    [
+        format(&metadata),
+        format(&overall),
+        format(&direction),
+        format(&target),
+        format(&resources),
+    ]
+    .join("\n\n")
 }

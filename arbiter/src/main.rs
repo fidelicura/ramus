@@ -20,7 +20,7 @@ mod report;
 mod trace;
 
 use clap::Parser;
-use cli::Args;
+use cli::{Arguments, Format};
 use ramus::Simulator;
 use report::Report;
 use std::error::Error;
@@ -28,7 +28,7 @@ use std::fs;
 use trace::Trace;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let args = Args::parse();
+    let arguments = Arguments::parse();
 
     // Format all available predictor names.
     let available = predictors::ALL
@@ -40,7 +40,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Verify requested predictors to simulate.
     let mut selected = Vec::new();
-    for name in &args.predictors {
+    for name in &arguments.predictors {
         match predictors::ALL.iter().find(|entry| entry.0 == name) {
             Some(entry) => selected.push(entry),
             None => {
@@ -50,14 +50,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     // Setup hardware costs that simulator will use.
-    let costs = costs::load(&args.costs)?;
+    let costs = costs::load(&arguments.costs)?;
 
     // Setup simulation config that simulator will use.
-    let config = config::load(&args.config)?;
+    let config = config::load(&arguments.config)?;
 
     // Expand any directories with traces into their contained files.
     let mut paths = Vec::new();
-    for path in args.traces {
+    for path in arguments.traces {
         if fs::metadata(&path)?.is_dir() {
             let entries = fs::read_dir(&path)?
                 .filter_map(Result::ok)
@@ -88,13 +88,22 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         // Build one report per predictor, in order of user selection.
         for (index, (name, _)) in selected.iter().enumerate() {
-            let report = Report::new(path, name, metrics[index], config);
+            let report = Report::new(
+                path,
+                name,
+                metrics[index],
+                config,
+                arguments.name.as_deref(),
+            );
             reports.push(report);
         }
     }
 
-    // Print report of every simulation executions to the user.
-    println!("{}", serde_json::to_string_pretty(&reports)?);
+    // Print reports in the requested format.
+    match arguments.format {
+        Format::Json => println!("{}", serde_json::to_string_pretty(&reports)?),
+        Format::Ascii => println!("{}", report::format_ascii(&reports)),
+    }
 
     Ok(())
 }

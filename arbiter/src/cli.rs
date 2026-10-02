@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 
 /// Trace-driven branch-predictor evaluation: run every `--predictors` selection
-/// over every `--traces` file, printing one JSON report per (trace, predictor) pair.
+/// over every `--traces` file, printing one report per (trace, predictor) pair.
 #[derive(Parser)]
-pub struct Args {
+pub struct Arguments {
     /// Trace files to sweep - CBP-NG 2026 Gzipped.
     ///
     /// Directories expand to their contained files.
@@ -35,4 +35,18 @@ pub struct Args {
     /// Simulation config JSON path, overriding the built-in default.
     #[arg(long)]
     pub config: Option<String>,
+
+    /// Run identifier to use in every report, overriding the generated petname.
+    #[arg(long)]
+    pub name: Option<String>,
+
+    /// Output format.
+    #[arg(long, value_enum, default_value = "json")]
+    pub format: Format,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub enum Format {
+    Json,
+    Ascii,
 }

@@ -50,6 +50,8 @@ struct Ledger {
     /// Ticked into [`Metrics::leakage`] once per cycle by [`Metrics::tick`],
     /// since leakage drains continuously however often ops fire.
     leakage: f64,
+    /// Greatest work time charged inside the active overlap group, if any.
+    overlap_time: Option<f64>,
     /// Whether metered operations currently accrue.
     ///
     /// The simulator clears this during a warmup window with charging
@@ -106,7 +108,7 @@ pub struct Metrics {
     pub total_space: f64,
     /// Total leakage energy accrued, ticked once per cycle for every distinct operation.
     pub total_leakage: f64,
-    /// Total work time charged, summed every time an operation runs.
+    /// Total modeled work time: serial operations sum; operations in one `overlap!` use their maximum.
     pub total_time: f64,
 }
 
@@ -115,6 +117,25 @@ impl Metrics {
     /// of [`Ledger`] state - including space-charging - behind.
     pub(crate) fn reset() -> Self {
         LEDGER.with(|cell| cell.replace(Ledger::new())).metrics
+    }
+
+    /// Run `f` as one overlap group: operation work times combine by maximum.
+    /// Other metrics retain their ordinary charging rules. Overlap groups cannot nest.
+    #[doc(hidden)] // Used by the exported `overlap!` macro.
+    pub fn overlap<R>(f: impl FnOnce() -> R) -> R {
+        LEDGER.with(|cell| {
+            let mut ledger = cell.borrow_mut();
+            assert!(
+                ledger.overlap_time.is_none(),
+                "nested overlap groups are unsupported"
+            );
+            ledger.overlap_time = Some(0.0);
+        });
+
+        let guard = overlap::Guard;
+        let result = f();
+        drop(guard);
+        result
     }
 
     /// Enable or disable metering for subsequent operations this run.
@@ -184,7 +205,11 @@ impl Metrics {
             }
 
             ledger.metrics.total_energy += energy;
-            ledger.metrics.total_time += time;
+            if let Some(overlap_time) = &mut ledger.overlap_time {
+                *overlap_time = overlap_time.max(time);
+            } else {
+                ledger.metrics.total_time += time;
+            }
             ledger.metrics.total_operations += 1;
 
             if ledger.charged.insert((operation, SIZE)) {
@@ -232,6 +257,49 @@ impl Metrics {
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // }} Metrics
 ////////////////////////////////////////////////////////////////////////////////////////////////////
+
+mod overlap {
+    use super::*;
+
+    pub struct Guard;
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            LEDGER.with(|cell| {
+                let mut ledger = cell.borrow_mut();
+                let time = ledger
+                    .overlap_time
+                    .take()
+                    .expect("overlap guard without active overlap group");
+                if ledger.charging {
+                    ledger.metrics.total_time += time;
+                }
+            });
+        }
+    }
+
+    /// Execute a block whose metered operations are modeled as overlapping.
+    ///
+    /// Rust evaluates the block normally and sequentially; the macro does not
+    /// create threads or infer dependencies. The caller asserts that the
+    /// metered operations can overlap: their work times contribute the maximum
+    /// latency, while energy and operation counts still sum. Area remains
+    /// charged once per distinct operation, and leakage continues to accrue on
+    /// simulator ticks. Nested overlap groups panic.
+    ///
+    /// Write independent operations as ordinary statements:
+    ///
+    /// ```ignore
+    /// overlap! {
+    ///     buffer[index] = target;
+    ///     valid[index] = Value::new(1);
+    /// }
+    /// ```
+    #[macro_export]
+    macro_rules! overlap {
+        ($($body:tt)*) => {{ $crate::Metrics::overlap(|| { $($body)* }) }};
+    }
+}
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // Costs {{
