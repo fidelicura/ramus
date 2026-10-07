@@ -28,6 +28,8 @@ use std::{array, ops};
 pub struct Array<const BITS: usize, const LENGTH: usize>([Value<BITS>; LENGTH]);
 
 impl<const BITS: usize, const LENGTH: usize> Array<BITS, LENGTH> {
+    crate::validate_bits!(BITS);
+
     /// Total static area of the array: per-cell width
     /// times cell count, in the cost model's area units.
     pub const SIZE: f64 = Value::<BITS>::SIZE * LENGTH as f64;

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::predictors::{Address, Target};
-use ramus::{Array, Direction, Kind, Prediction, Value, overlap, select};
+use ramus::{Array, Direction, Kind, Outcome, Prediction, Value, overlap, select};
 
 #[derive(Default)]
 struct SCT {
@@ -193,7 +193,7 @@ pub struct Predictor {
 }
 
 impl ramus::Predictor<64> for Predictor {
-    fn predict(&mut self, address: Address) -> Prediction<64> {
+    fn predict(&mut self, address: Address) -> Outcome<64> {
         let (kind, direction, guess_btb, guess_ras) = overlap! {(
             self.meta.lookup(address),
             self.sct.predict(address),
@@ -212,7 +212,9 @@ impl ramus::Predictor<64> for Predictor {
             None => guess_btb,
         });
 
-        Prediction { direction, target }
+        Outcome::immediate()
+            .set(Prediction { direction, target })
+            .finish()
     }
 
     fn update(&mut self, current: Address, kind: Kind, direction: Direction, next: Address) {

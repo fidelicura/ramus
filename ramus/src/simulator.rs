@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::common::{Address, Direction, Info, Kind, Prediction};
+use crate::common::{Address, Direction, Info, Kind, Outcome};
 use crate::observability::{Costs, Metrics};
 use std::collections::VecDeque;
 #[cfg(feature = "parallel")]
@@ -26,7 +26,7 @@ use std::thread;
 pub trait Predictor<const BITS: usize>: 'static {
     /// Predict both direction and target for every branch, before resolution.
     /// Only the branch address is supplied at prediction time; kind is revealed by `update`.
-    fn predict(&mut self, address: Address<BITS>) -> Prediction<BITS>;
+    fn predict(&mut self, address: Address<BITS>) -> Outcome<BITS>;
 
     /// Resolve a predicted branch, including warmup and target-buffer misses.
     /// `next` is the target if taken, the fall-through address otherwise.
@@ -53,7 +53,7 @@ pub trait Predictor<const BITS: usize>: 'static {
 /// This is what lets [`Simulator::run_many_predictors`] hold a heterogeneous
 /// `Vec` of differently-typed predictors behind trait objects.
 impl<const BITS: usize, P: Predictor<BITS> + ?Sized> Predictor<BITS> for Box<P> {
-    fn predict(&mut self, current: Address<BITS>) -> Prediction<BITS> {
+    fn predict(&mut self, current: Address<BITS>) -> Outcome<BITS> {
         (**self).predict(current)
     }
 
@@ -187,8 +187,13 @@ impl<const BITS: usize> Queue<BITS> {
         // XXX: Compare raw addresses (`.0`) so checking correctness does
         // not charge the predictor for a metered `Value` comparison.
         if score {
-            let direction_hit = prediction.direction.0 == info.direction.0;
-            let target_hit = prediction.target.0 == info.next.0;
+            let (direction_hit, target_hit) = if let Some(prediction) = prediction.collate(info) {
+                let direction_hit = prediction.direction.0 == info.direction.0;
+                let target_hit = prediction.target.0 == info.next.0;
+                (direction_hit, target_hit)
+            } else {
+                (false, false)
+            };
             Metrics::prediction(direction_hit, target_hit);
         }
 
@@ -432,7 +437,7 @@ impl<const BITS: usize, S: Source<BITS> + ?Sized> Source<BITS> for Box<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::observability::Cost;
+    use crate::{common::Prediction, observability::Cost};
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -448,11 +453,13 @@ mod tests {
     struct AlwaysTaken;
 
     impl Predictor<64> for AlwaysTaken {
-        fn predict(&mut self, _current: Address<64>) -> Prediction<64> {
-            Prediction {
-                direction: Direction::Taken,
-                target: crate::common::Target::ZERO,
-            }
+        fn predict(&mut self, _current: Address<64>) -> Outcome<64> {
+            Outcome::immediate()
+                .set(Prediction {
+                    direction: Direction::Taken,
+                    target: crate::common::Target::ZERO,
+                })
+                .finish()
         }
 
         fn size(&self) -> f64 {
@@ -465,11 +472,13 @@ mod tests {
     struct Stateful<const AREA: usize>;
 
     impl<const AREA: usize> Predictor<64> for Stateful<AREA> {
-        fn predict(&mut self, _current: Address<64>) -> Prediction<64> {
-            Prediction {
-                direction: Direction::Taken,
-                target: crate::common::Target::ZERO,
-            }
+        fn predict(&mut self, _current: Address<64>) -> Outcome<64> {
+            Outcome::immediate()
+                .set(Prediction {
+                    direction: Direction::Taken,
+                    target: crate::common::Target::ZERO,
+                })
+                .finish()
         }
 
         fn size(&self) -> f64 {
@@ -483,12 +492,14 @@ mod tests {
     struct OneAdd;
 
     impl Predictor<64> for OneAdd {
-        fn predict(&mut self, _current: Address<64>) -> Prediction<64> {
+        fn predict(&mut self, _current: Address<64>) -> Outcome<64> {
             let _ = crate::Value::<8>::ZERO.wrapping_add(1u8);
-            Prediction {
-                direction: Direction::Taken,
-                target: crate::common::Target::ZERO,
-            }
+            Outcome::immediate()
+                .set(Prediction {
+                    direction: Direction::Taken,
+                    target: crate::common::Target::ZERO,
+                })
+                .finish()
         }
 
         fn size(&self) -> f64 {
@@ -512,11 +523,13 @@ mod tests {
             updates: Rc<RefCell<Vec<Kind>>>,
         }
         impl Predictor<64> for Target {
-            fn predict(&mut self, _: Address<64>) -> Prediction<64> {
-                Prediction {
-                    direction: Direction::Taken,
-                    target: self.target,
-                }
+            fn predict(&mut self, _: Address<64>) -> Outcome<64> {
+                Outcome::immediate()
+                    .set(Prediction {
+                        direction: Direction::Taken,
+                        target: self.target,
+                    })
+                    .finish()
             }
             fn update(
                 &mut self,
@@ -598,8 +611,8 @@ mod tests {
     fn score_direction_target_and_early_next_pc_separately() {
         struct Fixed(Prediction<64>);
         impl Predictor<64> for Fixed {
-            fn predict(&mut self, _: Address<64>) -> Prediction<64> {
-                self.0
+            fn predict(&mut self, _: Address<64>) -> Outcome<64> {
+                Outcome::immediate().set(self.0).finish()
             }
             fn size(&self) -> f64 {
                 0.0
@@ -668,8 +681,8 @@ mod tests {
     fn unconditional_cfi_scores_direction_and_next_address() {
         struct Fixed(Prediction<64>);
         impl Predictor<64> for Fixed {
-            fn predict(&mut self, _: Address<64>) -> Prediction<64> {
-                self.0
+            fn predict(&mut self, _: Address<64>) -> Outcome<64> {
+                Outcome::immediate().set(self.0).finish()
             }
             fn size(&self) -> f64 {
                 0.0
@@ -885,7 +898,7 @@ mod tests {
     fn run_many_predictors_propagates_a_panicking_predictor() {
         struct Panics;
         impl Predictor<64> for Panics {
-            fn predict(&mut self, _current: Address<64>) -> Prediction<64> {
+            fn predict(&mut self, _current: Address<64>) -> Outcome<64> {
                 panic!("boom");
             }
 
@@ -925,11 +938,13 @@ mod tests {
     struct LastDirection(Direction);
 
     impl Predictor<64> for LastDirection {
-        fn predict(&mut self, _current: Address<64>) -> Prediction<64> {
-            Prediction {
-                direction: self.0,
-                target: crate::common::Target::ZERO,
-            }
+        fn predict(&mut self, _current: Address<64>) -> Outcome<64> {
+            Outcome::immediate()
+                .set(Prediction {
+                    direction: self.0,
+                    target: crate::common::Target::ZERO,
+                })
+                .finish()
         }
 
         fn update(
@@ -995,11 +1010,13 @@ mod tests {
     struct ChargeOnUpdate;
 
     impl Predictor<64> for ChargeOnUpdate {
-        fn predict(&mut self, _current: Address<64>) -> Prediction<64> {
-            Prediction {
-                direction: Direction::Taken,
-                target: crate::common::Target::ZERO,
-            }
+        fn predict(&mut self, _current: Address<64>) -> Outcome<64> {
+            Outcome::immediate()
+                .set(Prediction {
+                    direction: Direction::Taken,
+                    target: crate::common::Target::ZERO,
+                })
+                .finish()
         }
 
         fn update(
@@ -1048,12 +1065,14 @@ mod tests {
     struct Logger(Rc<RefCell<Vec<&'static str>>>);
 
     impl Predictor<64> for Logger {
-        fn predict(&mut self, _current: Address<64>) -> Prediction<64> {
+        fn predict(&mut self, _current: Address<64>) -> Outcome<64> {
             self.0.borrow_mut().push("predict");
-            Prediction {
-                direction: Direction::Taken,
-                target: crate::common::Target::ZERO,
-            }
+            Outcome::immediate()
+                .set(Prediction {
+                    direction: Direction::Taken,
+                    target: crate::common::Target::ZERO,
+                })
+                .finish()
         }
 
         fn update(

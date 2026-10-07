@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::observability::Metrics;
 use crate::primitives::Value;
 use std::ops;
 
@@ -45,6 +46,166 @@ pub struct Info<const BITS: usize> {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // }} Info
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// Outcome {{
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+#[derive(Debug, Default, Clone)]
+pub struct Outcome<const BITS: usize>(outcome::Storage<BITS>);
+
+impl<const BITS: usize> Outcome<BITS> {
+    pub(crate) const fn new(storage: outcome::Storage<BITS>) -> Self {
+        Self(storage)
+    }
+
+    pub(crate) fn collate(&self, info: Info<BITS>) -> Option<&Prediction<BITS>> {
+        let prediction = Prediction {
+            direction: info.direction,
+            target: info.next,
+        };
+        self.0.collate(prediction)
+    }
+
+    pub fn immediate() -> outcome::Immediate<BITS> {
+        outcome::Immediate::default()
+    }
+
+    pub fn staged() -> outcome::Staged<BITS> {
+        outcome::Staged::default()
+    }
+}
+
+mod outcome {
+    use super::*;
+
+    #[derive(Debug, Default, Clone)]
+    pub struct Storage<const BITS: usize> {
+        payload: Vec<(u64, Prediction<BITS>)>,
+    }
+
+    impl<const BITS: usize> Storage<BITS> {
+        pub const fn new() -> Self {
+            Self {
+                payload: Vec::new(),
+            }
+        }
+
+        pub fn put(&mut self, tuple: (u64, Prediction<BITS>)) {
+            self.payload.push(tuple);
+        }
+
+        pub fn len(&self) -> usize {
+            self.payload.len()
+        }
+
+        /// Returns the best prediction for `goal`.
+        ///
+        /// Selection happens in two stages:
+        ///
+        /// 1. Consider only predictions that hit at least by `direction` or `target`.
+        ///
+        /// 2. Rank the remaining predictions by hit quality:
+        ///    - hitting both `direction` and `target` is preferred;
+        ///    - otherwise, hitting either one is accepted,
+        ///    - for predictions with the same hit quality, the smallest
+        ///      `delay` is preferred.
+        ///
+        /// The delay associated with the result is always recorded in `Metrics`.
+        ///
+        /// If no prediction hits either field, the largest delay currently
+        /// present in the payload is recorded instead and `None` is returned,
+        /// signaling a "full" misprediction.
+        pub fn collate(&self, goal: Prediction<BITS>) -> Option<&Prediction<BITS>> {
+            // Keep the largest delay as the fallback metric. We only use it when
+            // no prediction ("full" misprediction) hits either the requested
+            // direction or target.
+            let max = self
+                .payload
+                .iter()
+                .max_by_key(|(delay, _prediction)| *delay);
+
+            // First discard completely unrelated predictions. Among the remaining
+            // candidates, prefer an exact match before considering partial hits.
+            let matched = self
+                .payload
+                .iter()
+                .filter(|(_delay, prediction)| {
+                    prediction.direction.0 == goal.direction.0
+                        || prediction.target.0 == goal.target.0
+                })
+                .min_by_key(|(delay, prediction)| {
+                    let direction_hit = prediction.direction.0 == goal.direction.0;
+                    let target_hit = prediction.target.0 == goal.target.0;
+
+                    // Tuple ordering gives hit quality absolute priority over delay:
+                    //
+                    //   (0, delay) => both fields match
+                    //   (1, delay) => exactly one field matches
+                    //
+                    // Only candidates with the same hit quality are compared by delay.
+                    let hit_rank = if direction_hit && target_hit { 0 } else { 1 };
+
+                    (hit_rank, *delay)
+                });
+
+            match matched {
+                Some((delay, prediction)) => {
+                    // Record the delay of the prediction we actually selected.
+                    Metrics::push(*delay);
+                    Some(prediction)
+                }
+                None => {
+                    // Nothing hitted even partially. Record the worst maximum
+                    // delay so the miss is still represented in the metrics.
+                    let delay = max.expect("payload must not be empty").0;
+                    Metrics::push(delay);
+                    None
+                }
+            }
+        }
+    }
+
+    #[derive(Debug, Default, Clone)]
+    pub struct Immediate<const BITS: usize> {
+        pub payload: Option<(u64, Prediction<BITS>)>,
+    }
+
+    impl<const BITS: usize> Immediate<BITS> {
+        pub fn set(self, prediction: Prediction<BITS>) -> Self {
+            let payload = (0u64, prediction);
+            Self {
+                payload: Some(payload),
+            }
+        }
+
+        pub fn finish(self) -> Outcome<BITS> {
+            let mut storage = Storage::new();
+            let payload = self.payload.expect("TODO");
+            storage.put(payload);
+            Outcome::new(storage)
+        }
+    }
+
+    #[derive(Debug, Default, Clone)]
+    pub struct Staged<const BITS: usize>(Storage<BITS>);
+
+    impl<const BITS: usize> Staged<BITS> {
+        pub fn at(&mut self, delay: u64, prediction: Prediction<BITS>) {
+            let payload = (delay, prediction);
+            self.0.put(payload);
+        }
+
+        pub fn finish(self) -> Outcome<BITS> {
+            assert_ne!(self.0.len(), 0, "TODO");
+            Outcome(self.0)
+        }
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// }} Outcome
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -201,6 +362,27 @@ pub type Target<const BITS: usize> = Address<BITS>;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // }} Target
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// validate_bits! {{
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+/// Compile-time guard: associating with this constant fails
+/// the build if `BITS` exceeds the 128-bit backing store.
+#[macro_export]
+macro_rules! validate_bits {
+    ($bits:ident) => {
+        #[allow(dead_code)] // XXX: It is not "dead" - it still asserts in const contexts.
+        const VALID: () = assert!(
+            $bits > 0 && $bits <= 128,
+            "BITS should be in range 0 < BITS <= 128"
+        );
+    };
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// }} validate_bits!
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 #[cfg(test)]

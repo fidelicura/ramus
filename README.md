@@ -214,7 +214,7 @@ impl Trace {
 //
 // Hand the `Simulator` a `Costs` table that fully prices every operation the
 // predictor performs, then it drives the predictor over the trace and returns
-// `Metrics`. Each price has four parts: `switching_energy` and `work_time`
+// `Metrics`. Each price has four parts: `switching_energy` and `latency_ticks`
 // accrue on every execution; `area_space` is the operation's area, counted
 // once per distinct size that operation runs at this run (e.g., once for
 // `Value<8>::wrapping_add`, again for `Value<64>::wrapping_add` - different
@@ -222,7 +222,7 @@ impl Trace {
 // static drain, ticked once per cycle (once per fetched record) for as long
 // as it exists this run. To model several instances of a component at the
 // same size, set its `area_space` to their combined area and `leakage_energy`
-// to their combined drain. `work_time` sums like energy into `Metrics` - the
+// to their combined drain. `latency_ticks` sums like energy into `Metrics` - the
 // framework has no dependency graph between operations, so it does not compute
 // a critical path, only the total work time charged over the run.
 ////////////////////////////////////////////////////////////////////////////////
@@ -230,7 +230,7 @@ impl Trace {
 use ramus::{Config, Cost, Costs, Simulator};
 
 fn main() {
-    // XXX: `switching_energy`, `leakage_energy`, `area_space`, AND `work_time`
+    // XXX: `switching_energy`, `leakage_energy`, `area_space`, AND `latency_ticks`
     // must be set on any operation that actually runs. Leave any at `None` and
     // the framework PANICS the moment that operation is charged. This is
     // deliberate: every hardware element has to be measurable, so a hole in
@@ -240,14 +240,14 @@ fn main() {
     // HINT: `serde` feature flag derives `serde::{Deserialize, Serialize}` on
     // data-containing structures, so results dump straight to format you need.
     let costs = Costs {
-        wrapping_shr:   Cost { switching_energy: Some(0.5), leakage_energy: Some(0.05), area_space: Some(0.6), work_time: Some(0.2) }, // `>>`: index/counter shifters.
-        wrapping_add:   Cost { switching_energy: Some(0.3), leakage_energy: Some(0.03), area_space: Some(0.4), work_time: Some(0.2) }, // Sequential PC fallback on a target-buffer miss.
-        bitand:         Cost { switching_energy: Some(0.1), leakage_energy: Some(0.01), area_space: Some(0.2), work_time: Some(0.1) }, // `&`: mask AND over the index.
-        saturating_add: Cost { switching_energy: Some(0.3), leakage_energy: Some(0.03), area_space: Some(0.4), work_time: Some(0.2) }, // `Value::saturating_add`: incrementer.
-        saturating_sub: Cost { switching_energy: Some(0.3), leakage_energy: Some(0.03), area_space: Some(0.4), work_time: Some(0.2) }, // `Value::saturating_sub`: decrementer.
-        select:         Cost { switching_energy: Some(0.2), leakage_energy: Some(0.02), area_space: Some(0.3), work_time: Some(0.1) }, // `select!`: 2-input multiplexer.
-        memory_read:    Cost { switching_energy: Some(0.4), leakage_energy: Some(0.04), area_space: Some(0.5), work_time: Some(0.3) }, // `Array[i]`: table read port.
-        memory_write:   Cost { switching_energy: Some(0.5), leakage_energy: Some(0.05), area_space: Some(0.5), work_time: Some(0.3) }, // `Array[i] = _`: table write port.
+        wrapping_shr:   Cost { switching_energy: Some(0.5), leakage_energy: Some(0.05), area_space: Some(0.6), latency_ticks: Some(2) }, // `>>`: index/counter shifters.
+        wrapping_add:   Cost { switching_energy: Some(0.3), leakage_energy: Some(0.03), area_space: Some(0.4), latency_ticks: Some(2) }, // Sequential PC fallback on a target-buffer miss.
+        bitand:         Cost { switching_energy: Some(0.1), leakage_energy: Some(0.01), area_space: Some(0.2), latency_ticks: Some(1) }, // `&`: mask AND over the index.
+        saturating_add: Cost { switching_energy: Some(0.3), leakage_energy: Some(0.03), area_space: Some(0.4), latency_ticks: Some(2) }, // `Value::saturating_add`: incrementer.
+        saturating_sub: Cost { switching_energy: Some(0.3), leakage_energy: Some(0.03), area_space: Some(0.4), latency_ticks: Some(2) }, // `Value::saturating_sub`: decrementer.
+        select:         Cost { switching_energy: Some(0.2), leakage_energy: Some(0.02), area_space: Some(0.3), latency_ticks: Some(1) }, // `select!`: 2-input multiplexer.
+        memory_read:    Cost { switching_energy: Some(0.4), leakage_energy: Some(0.04), area_space: Some(0.5), latency_ticks: Some(3) }, // `Array[i]`: table read port.
+        memory_write:   Cost { switching_energy: Some(0.5), leakage_energy: Some(0.05), area_space: Some(0.5), latency_ticks: Some(3) }, // `Array[i] = _`: table write port.
         ..Default::default()
     };
     let source = Trace::example();

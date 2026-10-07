@@ -29,9 +29,7 @@ use std::ops;
 pub struct Value<const BITS: usize>(pub(crate) u128);
 
 impl<const BITS: usize> Value<BITS> {
-    /// Compile-time guard: associating with this constant fails
-    /// the build if `BITS` exceeds the 128-bit backing store.
-    const VALID: () = assert!(BITS <= 128);
+    crate::validate_bits!(BITS);
 
     /// Bitmask of the low `BITS` bits, used to clamp every result to width.
     const MASK: u128 = match BITS {

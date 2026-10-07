@@ -50,8 +50,8 @@ struct Ledger {
     /// Ticked into [`Metrics::leakage`] once per cycle by [`Metrics::tick`],
     /// since leakage drains continuously however often ops fire.
     leakage: f64,
-    /// Greatest work time charged inside the active overlap group, if any.
-    overlap_time: Option<f64>,
+    /// Greatest work time charged inside each active overlap group, outermost first.
+    overlaps: Vec<u64>,
     /// Whether metered operations currently accrue.
     ///
     /// The simulator clears this during a warmup window with charging
@@ -109,7 +109,7 @@ pub struct Metrics {
     /// Total leakage energy accrued, ticked once per cycle for every distinct operation.
     pub total_leakage: f64,
     /// Total modeled work time: serial operations sum; operations in one `overlap!` use their maximum.
-    pub total_time: f64,
+    pub total_time: u64,
 }
 
 impl Metrics {
@@ -120,16 +120,12 @@ impl Metrics {
     }
 
     /// Run `f` as one overlap group: operation work times combine by maximum.
-    /// Other metrics retain their ordinary charging rules. Overlap groups cannot nest.
+    /// Nested groups contribute their maximum latency as one operation to their parent.
     #[doc(hidden)] // Used by the exported `overlap!` macro.
     pub fn overlap<R>(f: impl FnOnce() -> R) -> R {
         LEDGER.with(|cell| {
             let mut ledger = cell.borrow_mut();
-            assert!(
-                ledger.overlap_time.is_none(),
-                "nested overlap groups are unsupported"
-            );
-            ledger.overlap_time = Some(0.0);
+            ledger.overlaps.push(0);
         });
 
         let guard = overlap::Guard;
@@ -176,7 +172,7 @@ impl Metrics {
     ///
     /// Panics if any `Cost` field was left unset - that surfaces a mispriced model.
     ///
-    /// `switching_energy` and `work_time` accrue every time (plus one counted
+    /// `switching_energy` and `latency_ticks` accrue every time (plus one counted
     /// operation), while `area_space` and `leakage_energy` are added only the
     /// first time this exact `(operation, SIZE)` pair is charged this run, since
     /// that hardware exists (and leaks) once instantiated however often it then
@@ -188,8 +184,8 @@ impl Metrics {
         let energy = cost.switching_energy.unwrap_or_else(|| {
             panic!("`Costs::{operation:?}` charged but `Cost::switching_energy` left unset")
         });
-        let time = cost.work_time.unwrap_or_else(|| {
-            panic!("`Costs::{operation:?}` charged but `Cost::work_time` left unset")
+        let time = cost.latency_ticks.unwrap_or_else(|| {
+            panic!("`Costs::{operation:?}` charged but `Cost::latency_ticks` left unset")
         });
         let space = cost.area_space.unwrap_or_else(|| {
             panic!("`Costs::{operation:?}` charged but `Cost::area_space` left unset")
@@ -205,8 +201,8 @@ impl Metrics {
             }
 
             ledger.metrics.total_energy += energy;
-            if let Some(overlap_time) = &mut ledger.overlap_time {
-                *overlap_time = overlap_time.max(time);
+            if let Some(overlap) = ledger.overlaps.last_mut() {
+                *overlap = (*overlap).max(time);
             } else {
                 ledger.metrics.total_time += time;
             }
@@ -240,17 +236,32 @@ impl Metrics {
     #[doc(hidden)] // XXX(fidelicura): Public only so the `select!` macro can expand at call sites.
     pub fn select<const WAYS: usize>() {
         let cost = COSTS.with(Cell::get).select;
-        let scale = WAYS.saturating_sub(1) as f64;
+        let scale = const { WAYS.saturating_sub(1) };
 
         Self::charge::<WAYS>(
             Operation::select,
             Cost {
-                switching_energy: cost.switching_energy.map(|energy| energy * scale),
-                leakage_energy: cost.leakage_energy.map(|leakage| leakage * scale),
-                area_space: cost.area_space.map(|space| space * scale),
-                work_time: cost.work_time.map(|time| time * scale),
+                switching_energy: cost.switching_energy.map(|energy| energy * scale as f64),
+                leakage_energy: cost.leakage_energy.map(|leakage| leakage * scale as f64),
+                area_space: cost.area_space.map(|space| space * scale as f64),
+                latency_ticks: cost.latency_ticks.map(|time| time * scale as u64),
             },
         );
+    }
+
+    pub fn push(latency_delay: u64) {
+        LEDGER.with(|cell| {
+            let mut ledger = cell.borrow_mut();
+            if !ledger.charging {
+                return;
+            }
+
+            if let Some(overlap) = ledger.overlaps.last_mut() {
+                *overlap = (*overlap).max(latency_delay);
+            } else {
+                ledger.metrics.total_time += latency_delay;
+            }
+        });
     }
 }
 
@@ -268,10 +279,16 @@ mod overlap {
             LEDGER.with(|cell| {
                 let mut ledger = cell.borrow_mut();
                 let time = ledger
-                    .overlap_time
-                    .take()
+                    .overlaps
+                    .pop()
                     .expect("overlap guard without active overlap group");
-                if ledger.charging {
+                if !ledger.charging {
+                    return;
+                }
+
+                if let Some(parent) = ledger.overlaps.last_mut() {
+                    *parent = (*parent).max(time);
+                } else {
                     ledger.metrics.total_time += time;
                 }
             });
@@ -285,7 +302,8 @@ mod overlap {
     /// metered operations can overlap: their work times contribute the maximum
     /// latency, while energy and operation counts still sum. Area remains
     /// charged once per distinct operation, and leakage continues to accrue on
-    /// simulator ticks. Nested overlap groups panic.
+    /// simulator ticks. Nested groups contribute their maximum latency as one
+    /// operation to the surrounding group.
     ///
     /// Write independent operations as ordinary statements:
     ///
@@ -312,7 +330,7 @@ thread_local! {
     static COSTS: Cell<Costs> = Cell::new(Costs::default());
 }
 
-/// Cost of one operation: dynamic `switching_energy` and `work_time`, and
+/// Cost of one operation: dynamic `switching_energy` and `latency_ticks`, and
 /// static `area_space` and `leakage_energy` ticked every cycle once the
 /// operation's hardware exists.
 ///
@@ -326,7 +344,7 @@ pub struct Cost {
     pub switching_energy: Option<f64>,
     pub leakage_energy: Option<f64>,
     pub area_space: Option<f64>,
-    pub work_time: Option<f64>,
+    pub latency_ticks: Option<u64>,
 }
 
 impl Cost {
@@ -336,7 +354,7 @@ impl Cost {
             switching_energy: Some(0.0),
             leakage_energy: Some(0.0),
             area_space: Some(0.0),
-            work_time: Some(0.0),
+            latency_ticks: Some(0),
         }
     }
 }
@@ -536,7 +554,7 @@ mod tests {
                 switching_energy: Some(10.0),
                 leakage_energy: Some(3.0),
                 area_space: Some(4.0),
-                work_time: Some(2.0),
+                latency_ticks: Some(2),
             },
             ..Costs::default()
         });
@@ -548,7 +566,7 @@ mod tests {
         assert_eq!(m.total_energy, 30.0); // 10 * 3.
         assert_eq!(m.total_space, 12.0); // 4 * 3.
         assert_eq!(m.total_leakage, 9.0); // 3 * 3, ticked once.
-        assert_eq!(m.total_time, 6.0); // 2 * 3.
+        assert_eq!(m.total_time, 6); // 2 * 3.
 
         Metrics::select::<1>(); // Single input is free.
         assert_eq!(Metrics::reset().total_energy, 0.0);
@@ -585,7 +603,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "`Costs::wrapping_add` charged but `Cost::work_time` left unset")]
+    #[should_panic(expected = "`Costs::wrapping_add` charged but `Cost::latency_ticks` left unset")]
     fn charge_panics_on_unset_time() {
         let costs = Costs {
             wrapping_add: Cost {
@@ -605,7 +623,7 @@ mod tests {
                 switching_energy: Some(1.0),
                 leakage_energy: Some(1.0),
                 area_space: None,
-                work_time: Some(1.0),
+                latency_ticks: Some(1),
             },
             ..Costs::default()
         };
@@ -622,7 +640,7 @@ mod tests {
                 switching_energy: Some(1.0),
                 leakage_energy: None,
                 area_space: Some(1.0),
-                work_time: Some(1.0),
+                latency_ticks: Some(1),
             },
             ..Costs::default()
         };
@@ -635,16 +653,32 @@ mod tests {
         assert_eq!(m.total_energy, 0.0);
         assert_eq!(m.total_space, 0.0);
         assert_eq!(m.total_leakage, 0.0);
-        assert_eq!(m.total_time, 0.0);
+        assert_eq!(m.total_time, 0);
     }
 
     #[test]
-    fn charge_accumulates_work_time_every_time() {
+    fn nested_overlap_groups_contribute_their_maximum_to_parent() {
+        Metrics::reset();
+        Metrics::overlap(|| {
+            Metrics::push(3);
+            Metrics::overlap(|| {
+                Metrics::push(5);
+                Metrics::push(7);
+            });
+            Metrics::push(4);
+        });
+        Metrics::push(2);
+
+        assert_eq!(Metrics::reset().total_time, 9);
+    }
+
+    #[test]
+    fn charge_accumulates_latency_ticks_every_time() {
         let cost = Cost {
-            work_time: Some(0.5),
+            latency_ticks: Some(2),
             ..Cost::free()
         };
-        assert_eq!(charge_n(cost, 4).total_time, 2.0);
+        assert_eq!(charge_n(cost, 4).total_time, 8);
     }
 
     #[test]
@@ -679,7 +713,7 @@ mod tests {
                 switching_energy: Some(1.0),
                 leakage_energy: Some(1.0),
                 area_space: Some(4.0),
-                work_time: Some(1.0),
+                latency_ticks: Some(1),
             },
             ..Costs::default()
         });

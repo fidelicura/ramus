@@ -26,6 +26,8 @@ use std::ops;
 pub struct Register<const BITS: usize>(Value<BITS>);
 
 impl<const BITS: usize> Register<BITS> {
+    crate::validate_bits!(BITS);
+
     /// Static area of one register: its `BITS` width, in the cost model's area units.
     pub const SIZE: f64 = Value::<BITS>::SIZE;
 

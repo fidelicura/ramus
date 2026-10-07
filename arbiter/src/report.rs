@@ -36,7 +36,7 @@ pub struct Report<'a> {
     pub total_energy: f64,
     pub total_leakage: f64,
     pub total_space: f64,
-    pub total_time: f64,
+    pub total_time: u64,
     pub hit_rate: f64,
     pub miss_rate: f64,
     pub direction_accuracy: f64,
