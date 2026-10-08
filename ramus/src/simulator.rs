@@ -702,22 +702,34 @@ mod tests {
 
         let early_exact = Simulator::run_one(
             VecDeque::from([actual]),
-            Fixed(make(&[(2, Direction::Taken, 4), (5, Direction::Untaken, 4)])),
+            Fixed(make(&[
+                (2, Direction::Taken, 4),
+                (5, Direction::Untaken, 4),
+            ])),
             Costs::default(),
             Config::none(),
         );
         assert_eq!(early_exact.total_hits, 0);
-        assert_eq!((early_exact.direction_hits, early_exact.target_hits), (0, 1));
+        assert_eq!(
+            (early_exact.direction_hits, early_exact.target_hits),
+            (0, 1)
+        );
         assert_eq!(early_exact.total_time, 5);
 
         let partial_only = Simulator::run_one(
             VecDeque::from([actual]),
-            Fixed(make(&[(2, Direction::Taken, 0), (5, Direction::Untaken, 4)])),
+            Fixed(make(&[
+                (2, Direction::Taken, 0),
+                (5, Direction::Untaken, 4),
+            ])),
             Costs::default(),
             Config::none(),
         );
         assert_eq!(partial_only.total_hits, 0);
-        assert_eq!((partial_only.direction_hits, partial_only.target_hits), (0, 1));
+        assert_eq!(
+            (partial_only.direction_hits, partial_only.target_hits),
+            (0, 1)
+        );
         assert_eq!(partial_only.total_time, 5);
     }
 

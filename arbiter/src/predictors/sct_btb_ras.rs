@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::predictors::{Address, Target};
+use crate::predictors::{
+    Address,
+    common::{BTB, RAS},
+};
 use ramus::{Array, Direction, Kind, Outcome, Prediction, Value, overlap, select};
 
 #[derive(Default)]
@@ -56,139 +59,44 @@ impl SCT {
         });
     }
 
-    fn size(&self) -> f64 {
+    const fn size(&self) -> f64 {
         Array::<2, { Self::LENGTH }>::SIZE
     }
 }
 
 #[derive(Default)]
-struct BTB {
-    buffer: Array<64, { Self::LENGTH }>,
-    valid: Array<1, { Self::LENGTH }>,
-} // Target: *b*ranch *t*arget *b*uffer.
-
-impl BTB {
-    /// Number of buckets in the table - one per branch address (after folding).
-    ///
-    /// Kept a power of two so the index can use a cheap AND mask (see `MASK`).
-    const LENGTH: usize = 2usize.pow(12);
-
-    /// A power-of-two table size lets us fold an address into a bucket with a
-    /// single AND instead of a `%`: `addr & (LENGTH - 1)` is the bottom 12 bits.
-    const MASK: u32 = Self::LENGTH as u32 - 1;
-
-    /// Map a branch address to its bucket index.
-    fn index(address: Address) -> Value<64> {
-        // Instructions are 4-byte aligned, so the lowest 2 bits are always zero
-        // and carry no information. Drop them first so neighbouring branches
-        // don't all collide into the same bucket.
-        let folded = address >> 2u8;
-        // Keep only the lowest 12 bits => an index in 0..2^12 (0..4096).
-        folded & Self::MASK
-    }
-
-    fn predict(&self, address: Address) -> Target {
-        let index = Self::index(address);
-        select!(self.valid[index] == 1u8 => {
-            true => self.buffer[index],
-            false => address.wrapping_add(4u8),
-        })
-    }
-
-    fn update(&mut self, address: Address, target: Target) {
-        let index = Self::index(address);
-        overlap! {
-            self.buffer[index] = target;
-            self.valid[index] = Value::new(1);
-        };
-    }
-
-    fn size(&self) -> f64 {
-        Array::<64, { Self::LENGTH }>::SIZE + Array::<1, { Self::LENGTH }>::SIZE
-    }
-}
-
-#[derive(Default)]
-struct RAS {
-    stack: Array<64, { Self::LENGTH }>,
-    count: Value<6>,
-} // Stack: *r*eturn *a*ddress *s*tack.
-
-impl RAS {
-    /// Number of buckets in the table - one per branch address (after folding).
-    ///
-    /// Kept a power of two so the index can use a cheap AND mask (see `MASK`).
-    const LENGTH: usize = 2usize.pow(5);
-
-    fn push(&mut self, target: Target) {
-        select!(self.count < Self::LENGTH as u8 => {
-            true => {
-                self.stack[self.count] = target;
-                self.count = self.count.saturating_add(1u8);
-            },
-            false => {},
-        });
-    }
-
-    fn pop(&mut self) {
-        select!(self.count > 0u8 => {
-            true => {
-                self.count = self.count.saturating_sub(1u8);
-                self.stack[self.count] = Target::ZERO;
-            },
-            false => {},
-        });
-    }
-
-    fn peek(&self) -> Option<Target> {
-        select!(self.count > 0u8 => {
-            true => Some(self.stack[self.count.saturating_sub(1u8)]),
-            false => None,
-        })
-    }
-
-    fn update(&mut self, address: Address, kind: Kind) {
-        select!(kind => {
-            Kind::CallDirect | Kind::CallIndirect => self.push(address),
-            Kind::Return => self.pop(),
-            _ => unreachable!(),
-        });
-    }
-
-    fn size(&self) -> f64 {
-        Array::<64, { Self::LENGTH }>::SIZE + Value::<6>::SIZE
-    }
-}
-
-#[derive(Default)]
 struct Meta {
-    table: Array<3, { BTB::LENGTH }>,
-    valid: Array<1, { BTB::LENGTH }>,
+    table: Array<3, { Self::LENGTH }>,
+    valid: Array<1, { Self::LENGTH }>,
 }
 
 impl Meta {
+    const LENGTH: usize = 4096;
+
     fn lookup(&self, address: Address) -> Option<Kind> {
-        let index = BTB::index(address);
+        let index = BTB::<{ Self::LENGTH }>::index(address);
         let valid = self.valid[index] == 1u8;
         valid.then(|| Kind::from(self.table[index]))
     }
 
     fn update(&mut self, address: Address, kind: Kind) {
-        let index = BTB::index(address);
-        self.table[index] = Value::from(kind);
-        self.valid[index] = Value::new(1);
+        let index = BTB::<{ Self::LENGTH }>::index(address);
+        overlap! {
+            self.table[index] = Value::from(kind);
+            self.valid[index] = Value::new(1);
+        }
     }
 
-    fn size(&self) -> f64 {
-        Array::<3, { BTB::LENGTH }>::SIZE + Array::<1, { BTB::LENGTH }>::SIZE
+    const fn size(&self) -> f64 {
+        Array::<3, { Self::LENGTH }>::SIZE + Array::<1, { Self::LENGTH }>::SIZE
     }
 }
 
 #[derive(Default)]
 pub struct Predictor {
     sct: SCT,
-    btb: BTB,
-    ras: RAS,
+    btb: BTB<4096>,
+    ras: RAS<32, 6>,
     meta: Meta,
 }
 
