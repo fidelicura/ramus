@@ -92,7 +92,7 @@ pub struct Metrics {
     pub total_predictions: u64,
     /// Number of metered operations executed.
     pub total_operations: u64,
-    /// Number of correct early next-PC predictions (direction and next address).
+    /// Number of branches whose final staged prediction is exact.
     pub total_hits: u64,
     /// Number of branches whose direction was scored.
     pub direction_predictions: u64,
@@ -155,8 +155,8 @@ impl Metrics {
         });
     }
 
-    /// Score one branch's direction and next address; `hits` records when both are correct.
-    pub(crate) fn prediction(direction_hit: bool, target_hit: bool) {
+    /// Score one branch's final staged direction and target result.
+    pub(crate) fn prediction(exact_hit: bool, direction_hit: bool, target_hit: bool) {
         LEDGER.with(|cell| {
             let mut ledger = cell.borrow_mut();
             ledger.metrics.total_predictions += 1;
@@ -164,7 +164,7 @@ impl Metrics {
             ledger.metrics.target_predictions += 1;
             direction_hit.then(|| ledger.metrics.direction_hits += 1);
             target_hit.then(|| ledger.metrics.target_hits += 1);
-            (direction_hit && target_hit).then(|| ledger.metrics.total_hits += 1);
+            exact_hit.then(|| ledger.metrics.total_hits += 1);
         });
     }
 
@@ -444,9 +444,9 @@ mod tests {
     #[test]
     fn prediction_tracks_independent_scores() {
         Metrics::reset();
-        Metrics::prediction(true, true);
-        Metrics::prediction(false, false);
-        Metrics::prediction(true, false);
+        Metrics::prediction(true, true, true);
+        Metrics::prediction(false, false, false);
+        Metrics::prediction(false, true, false);
 
         let m = Metrics::reset();
         assert_eq!(m.total_predictions, 3);

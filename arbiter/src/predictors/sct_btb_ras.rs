@@ -218,18 +218,20 @@ impl ramus::Predictor<64> for Predictor {
     }
 
     fn update(&mut self, current: Address, kind: Kind, direction: Direction, next: Address) {
-        select!(direction => {
-            Direction::Taken => self.btb.update(current, next),
-            Direction::Untaken => {},
-        });
-        self.sct.update(current, direction);
-        select!(kind => {
-            Kind::CallDirect => self.ras.update(next, kind),
-            Kind::CallIndirect => self.ras.update(next, kind),
-            Kind::Return => self.ras.update(current, kind),
-            _ => {},
-        });
-        self.meta.update(current, kind);
+        overlap! {
+            select!(direction => {
+                Direction::Taken => self.btb.update(current, next),
+                Direction::Untaken => {},
+            });
+            self.sct.update(current, direction);
+            select!(kind => {
+                Kind::CallDirect => self.ras.update(next, kind),
+                Kind::CallIndirect => self.ras.update(next, kind),
+                Kind::Return => self.ras.update(current, kind),
+                _ => {},
+            });
+            self.meta.update(current, kind);
+        }
     }
 
     fn size(&self) -> f64 {

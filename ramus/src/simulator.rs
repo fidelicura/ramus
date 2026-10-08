@@ -183,18 +183,13 @@ impl<const BITS: usize> Queue<BITS> {
         // 2. Score immediately: the trace already carries the answer, even
         // though the predictor has not received it yet. Warmup skips this
         // step. Every CFI's predicted direction and next address are scored
-        // independently; the combined hit requires both to be correct.
+        // independently at the final stage; the exact hit requires both
+        // fields to match at that same stage.
         // XXX: Compare raw addresses (`.0`) so checking correctness does
         // not charge the predictor for a metered `Value` comparison.
         if score {
-            let (direction_hit, target_hit) = if let Some(prediction) = prediction.collate(info) {
-                let direction_hit = prediction.direction.0 == info.direction.0;
-                let target_hit = prediction.target.0 == info.next.0;
-                (direction_hit, target_hit)
-            } else {
-                (false, false)
-            };
-            Metrics::prediction(direction_hit, target_hit);
+            let (exact_hit, direction_hit, target_hit) = prediction.collate(info);
+            Metrics::prediction(exact_hit, direction_hit, target_hit);
         }
 
         // 3. Queue the branch for training. If this exceeds the unresolved
@@ -675,6 +670,55 @@ mod tests {
             assert_eq!(metrics.total_hits, u64::from(next_pc_hit));
             assert_eq!(metrics.total_operations, 0);
         }
+    }
+
+    #[test]
+    fn staged_prediction_scores_the_final_stage() {
+        struct Fixed(Outcome<64>);
+        impl Predictor<64> for Fixed {
+            fn predict(&mut self, _: Address<64>) -> Outcome<64> {
+                self.0.clone()
+            }
+            fn size(&self) -> f64 {
+                0.0
+            }
+        }
+
+        let mut actual = branch(Kind::ConditionalDirect, Direction::Taken);
+        actual.next = Address::new(4);
+        let make = |stages: &[(u64, Direction, u64)]| {
+            let mut outcome = Outcome::staged();
+            for &(delay, direction, target) in stages {
+                outcome.at(
+                    delay,
+                    Prediction {
+                        direction,
+                        target: crate::common::Target::new(target as u128),
+                    },
+                );
+            }
+            outcome.finish()
+        };
+
+        let early_exact = Simulator::run_one(
+            VecDeque::from([actual]),
+            Fixed(make(&[(2, Direction::Taken, 4), (5, Direction::Untaken, 4)])),
+            Costs::default(),
+            Config::none(),
+        );
+        assert_eq!(early_exact.total_hits, 0);
+        assert_eq!((early_exact.direction_hits, early_exact.target_hits), (0, 1));
+        assert_eq!(early_exact.total_time, 5);
+
+        let partial_only = Simulator::run_one(
+            VecDeque::from([actual]),
+            Fixed(make(&[(2, Direction::Taken, 0), (5, Direction::Untaken, 4)])),
+            Costs::default(),
+            Config::none(),
+        );
+        assert_eq!(partial_only.total_hits, 0);
+        assert_eq!((partial_only.direction_hits, partial_only.target_hits), (0, 1));
+        assert_eq!(partial_only.total_time, 5);
     }
 
     #[test]

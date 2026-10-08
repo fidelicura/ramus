@@ -60,12 +60,12 @@ impl<const BITS: usize> Outcome<BITS> {
         Self(storage)
     }
 
-    pub(crate) fn collate(&self, info: Info<BITS>) -> Option<&Prediction<BITS>> {
-        let prediction = Prediction {
+    pub(crate) fn collate(&self, info: Info<BITS>) -> (bool, bool, bool) {
+        let goal = Prediction {
             direction: info.direction,
             target: info.next,
         };
-        self.0.collate(prediction)
+        self.0.collate(goal)
     }
 
     pub fn immediate() -> outcome::Immediate<BITS> {
@@ -100,70 +100,23 @@ mod outcome {
             self.payload.len()
         }
 
-        /// Returns the best prediction for `goal`.
+        /// Score the staged predictions against the actual outcome.
         ///
-        /// Selection happens in two stages:
-        ///
-        /// 1. Consider only predictions that hit at least by `direction` or `target`.
-        ///
-        /// 2. Rank the remaining predictions by hit quality:
-        ///    - hitting both `direction` and `target` is preferred;
-        ///    - otherwise, hitting either one is accepted,
-        ///    - for predictions with the same hit quality, the smallest
-        ///      `delay` is preferred.
-        ///
-        /// The delay associated with the result is always recorded in `Metrics`.
-        ///
-        /// If no prediction hits either field, the largest delay currently
-        /// present in the payload is recorded instead and `None` is returned,
-        /// signaling a "full" misprediction.
-        pub fn collate(&self, goal: Prediction<BITS>) -> Option<&Prediction<BITS>> {
-            // Keep the largest delay as the fallback metric. We only use it when
-            // no prediction ("full" misprediction) hits either the requested
-            // direction or target.
-            let max = self
+        /// Score the greatest-delay prediction's direction and next address.
+        /// Timing uses that same prediction's delay.
+        pub fn collate(&self, goal: Prediction<BITS>) -> (bool, bool, bool) {
+            let (prediction_delay, final_prediction) = self
                 .payload
                 .iter()
-                .max_by_key(|(delay, _prediction)| *delay);
+                .max_by_key(|(delay, _)| *delay)
+                .expect("outcome must contain at least one prediction");
 
-            // First discard completely unrelated predictions. Among the remaining
-            // candidates, prefer an exact match before considering partial hits.
-            let matched = self
-                .payload
-                .iter()
-                .filter(|(_delay, prediction)| {
-                    prediction.direction.0 == goal.direction.0
-                        || prediction.target.0 == goal.target.0
-                })
-                .min_by_key(|(delay, prediction)| {
-                    let direction_hit = prediction.direction.0 == goal.direction.0;
-                    let target_hit = prediction.target.0 == goal.target.0;
+            let target_hit = final_prediction.target.0 == goal.target.0;
+            let direction_hit = final_prediction.direction.0 == goal.direction.0;
+            let exact_hit = direction_hit && target_hit;
 
-                    // Tuple ordering gives hit quality absolute priority over delay:
-                    //
-                    //   (0, delay) => both fields match
-                    //   (1, delay) => exactly one field matches
-                    //
-                    // Only candidates with the same hit quality are compared by delay.
-                    let hit_rank = if direction_hit && target_hit { 0 } else { 1 };
-
-                    (hit_rank, *delay)
-                });
-
-            match matched {
-                Some((delay, prediction)) => {
-                    // Record the delay of the prediction we actually selected.
-                    Metrics::push(*delay);
-                    Some(prediction)
-                }
-                None => {
-                    // Nothing hitted even partially. Record the worst maximum
-                    // delay so the miss is still represented in the metrics.
-                    let delay = max.expect("payload must not be empty").0;
-                    Metrics::push(delay);
-                    None
-                }
-            }
+            Metrics::push(*prediction_delay);
+            (exact_hit, direction_hit, target_hit)
         }
     }
 
