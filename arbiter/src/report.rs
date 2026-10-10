@@ -15,6 +15,7 @@
 use comfy_table::Table;
 use ramus::{Config, Metrics};
 use serde::Serialize;
+use std::path::Path;
 
 /// One predictor's run over one trace, raw totals plus the ratios derived from them.
 #[derive(Serialize)]
@@ -47,15 +48,6 @@ pub struct Report<'a> {
     pub energy_per_hit: f64,
     pub energy_per_miss: f64,
     pub energy_per_area: f64,
-}
-
-/// Divide guarding a zero denominator, which yields `0.0` rather than NaN.
-fn ratio(numerator: f64, denominator: f64) -> f64 {
-    if denominator == 0.0 {
-        0.0
-    } else {
-        numerator / denominator
-    }
 }
 
 impl<'a> Report<'a> {
@@ -110,6 +102,15 @@ impl<'a> Report<'a> {
     }
 }
 
+/// Divide guarding a zero denominator, which yields `0.0` rather than NaN.
+fn ratio(numerator: f64, denominator: f64) -> f64 {
+    if denominator == 0.0 {
+        0.0
+    } else {
+        numerator / denominator
+    }
+}
+
 pub fn format_ascii(reports: &[Report<'_>]) -> String {
     if reports.is_empty() {
         return "No reports.".to_owned();
@@ -135,7 +136,7 @@ pub fn format_ascii(reports: &[Report<'_>]) -> String {
 fn ascii_rows(report: &Report<'_>) -> Vec<(&'static str, String)> {
     vec![
         ("Run identifier", report.run_identifier.clone()),
-        ("Trace path", report.trace_path.to_owned()),
+        ("Trace path", shorten_path(report.trace_path)),
         ("Predictor name", report.predictor_name.to_owned()),
         ("Configured warmup", report.configured_warmup.to_string()),
         (
@@ -187,4 +188,23 @@ fn ascii_rows(report: &Report<'_>) -> Vec<(&'static str, String)> {
         ("Energy/miss", format!("{:.6}", report.energy_per_miss)),
         ("Energy/area", format!("{:.6}", report.energy_per_area)),
     ]
+}
+
+fn shorten_path(path: &str) -> String {
+    let mut components = Path::new(path).components().rev();
+    let (Some(file), Some(parent), Some(_)) =
+        (components.next(), components.next(), components.next())
+    else {
+        return path.to_owned();
+    };
+    let shortened = format!(
+        ".../{}/{}",
+        parent.as_os_str().to_string_lossy(),
+        file.as_os_str().to_string_lossy()
+    );
+    if shortened.len() < path.len() {
+        shortened
+    } else {
+        path.to_owned()
+    }
 }

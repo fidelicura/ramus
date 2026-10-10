@@ -15,8 +15,8 @@
 use clap::{Parser, ValueEnum};
 
 /// Trace-driven branch-predictor evaluation: run every `--predictors` selection
-/// over every `--traces` file for each `--warmups` value, printing one report
-/// per (trace, warmup, predictor) combination.
+/// over every `--traces` file for each `--warmups` and `--speculations` value,
+/// printing one report per (trace, warmup, speculations, predictor) combination.
 #[derive(Parser)]
 pub struct Arguments {
     /// Trace files to sweep - CBP-NG 2026 Gzipped.
@@ -37,9 +37,9 @@ pub struct Arguments {
     #[arg(long, value_delimiter = ',', default_value = "0")]
     pub warmups: Vec<u64>,
 
-    /// Maximum number of predictions allowed to remain unresolved at once.
-    #[arg(long, default_value_t = 0)]
-    pub speculations: u64,
+    /// Comma-separated limits on predictions allowed to remain unresolved at once.
+    #[arg(long, value_delimiter = ',', default_value = "0")]
+    pub speculations: Vec<u64>,
 
     /// Run identifier to use in every report, overriding the generated petname.
     #[arg(long)]
@@ -62,7 +62,7 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn parses_comma_separated_warmups() {
+    fn parses_comma_separated_warmups_and_speculations() {
         let arguments = Arguments::try_parse_from([
             "arbiter",
             "--traces",
@@ -71,9 +71,12 @@ mod tests {
             "bimodal",
             "--warmups",
             "0,16,128",
+            "--speculations",
+            "0,2,8",
         ])
         .unwrap();
 
         assert_eq!(arguments.warmups, vec![0, 16, 128]);
+        assert_eq!(arguments.speculations, vec![0, 2, 8]);
     }
 }

@@ -15,8 +15,6 @@
 use crate::common::{Address, Direction, Info, Kind, Outcome};
 use crate::observability::{Costs, Metrics};
 use std::collections::VecDeque;
-#[cfg(feature = "parallel")]
-use std::thread;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // Predictor {{
@@ -50,8 +48,8 @@ pub trait Predictor<const BITS: usize>: 'static {
 
 /// Forwards to the boxed predictor, so a `Box<dyn Predictor>` is itself a `Predictor`.
 ///
-/// This is what lets [`Simulator::run_many_predictors`] hold a heterogeneous
-/// `Vec` of differently-typed predictors behind trait objects.
+/// This is what lets [`Simulator::run_many`] build heterogeneous predictors
+/// behind trait objects.
 impl<const BITS: usize, P: Predictor<BITS> + ?Sized> Predictor<BITS> for Box<P> {
     fn predict(&mut self, current: Address<BITS>) -> Outcome<BITS> {
         (**self).predict(current)
@@ -291,104 +289,49 @@ impl Simulator {
         Metrics::reset()
     }
 
-    /// Run each predictor over its own clone of the `source` trace under
-    /// `costs`, returning one [`Metrics`] per predictor in the same order.
+    /// Run every source × config × predictor combination and return one metric
+    /// per run, ordered by source, config, then predictor.
     ///
-    /// With the `parallel` feature the runs are spread across threads.
-    #[cfg(not(feature = "parallel"))]
-    pub fn run_many_predictors<const BITS: usize, S>(
-        source: S,
-        predictors: Vec<Box<dyn Predictor<BITS>>>,
+    /// `predictor_builders` create fresh predictors for every run. With the
+    /// `parallel` feature, all combinations run on a bounded thread pool.
+    pub fn run_many<const BITS: usize, S, F>(
+        sources: Vec<S>,
+        predictors: Vec<F>,
+        configs: Vec<Config>,
         costs: Costs,
-        config: Config,
     ) -> Vec<Metrics>
     where
-        S: Source<BITS> + Clone,
+        S: Source<BITS> + Clone + Send + Sync,
+        F: Fn() -> Box<dyn Predictor<BITS> + Send> + Sync,
     {
-        predictors
-            .into_iter()
-            .map(|predictor| Self::run_one(source.clone(), predictor, costs, config))
-            .collect()
-    }
-
-    /// Run each predictor over its own clone of the `source` trace under
-    /// `costs`, returning one [`Metrics`] per predictor in the same order.
-    ///
-    /// With the `parallel` feature the runs are spread across threads.
-    #[cfg(feature = "parallel")]
-    pub fn run_many_predictors<const BITS: usize, S>(
-        source: S,
-        predictors: Vec<Box<dyn Predictor<BITS> + Send>>,
-        costs: Costs,
-        config: Config,
-    ) -> Vec<Metrics>
-    where
-        S: Source<BITS> + Clone + Send,
-    {
-        thread::scope(|scope| {
-            predictors
-                .into_iter()
-                .map(|predictor| {
-                    let source = source.clone();
-                    scope.spawn(move || Self::run_one(source, predictor, costs, config))
+        let config_count = configs.len();
+        let predictor_count = predictors.len();
+        let jobs = (0..sources.len())
+            .flat_map(|source| {
+                (0..config_count).flat_map(move |config| {
+                    (0..predictor_count).map(move |predictor| (source, config, predictor))
                 })
-                .collect::<Vec<_>>()
-                .into_iter()
-                .map(|handle| handle.join().expect("predictor thread panicked"))
-                .collect()
-        })
-    }
+            })
+            .collect::<Vec<_>>();
+        let run = |(source, config, predictor): (usize, usize, usize)| {
+            Self::run_one(
+                sources[source].clone(),
+                predictors[predictor](),
+                costs,
+                configs[config],
+            )
+        };
 
-    /// Run a clone of `predictor` over each source under `costs`, returning
-    /// one [`Metrics`] per source in the same order.
-    ///
-    /// Each source trains its own fresh copy of the predictor.
-    ///
-    /// With the `parallel` feature the runs are spread across threads.
-    #[cfg(not(feature = "parallel"))]
-    pub fn run_many_sources<const BITS: usize, P>(
-        sources: Vec<Box<dyn Source<BITS>>>,
-        predictor: P,
-        costs: Costs,
-        config: Config,
-    ) -> Vec<Metrics>
-    where
-        P: Predictor<BITS> + Clone,
-    {
-        sources
-            .into_iter()
-            .map(|source| Self::run_one(source, predictor.clone(), costs, config))
-            .collect()
-    }
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
 
-    /// Run a clone of `predictor` over each source under `costs`, returning
-    /// one [`Metrics`] per source in the same order.
-    ///
-    /// Each source trains its own fresh copy of the predictor.
-    ///
-    /// With the `parallel` feature the runs are spread across threads.
-    #[cfg(feature = "parallel")]
-    pub fn run_many_sources<const BITS: usize, P>(
-        sources: Vec<Box<dyn Source<BITS> + Send>>,
-        predictor: P,
-        costs: Costs,
-        config: Config,
-    ) -> Vec<Metrics>
-    where
-        P: Predictor<BITS> + Clone + Send,
-    {
-        thread::scope(|scope| {
-            sources
-                .into_iter()
-                .map(|source| {
-                    let predictor = predictor.clone();
-                    scope.spawn(move || Self::run_one(source, predictor, costs, config))
-                })
-                .collect::<Vec<_>>()
-                .into_iter()
-                .map(|handle| handle.join().expect("source thread panicked"))
-                .collect()
-        })
+            jobs.into_par_iter().map(run).collect()
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            jobs.into_iter().map(run).collect()
+        }
     }
 }
 
@@ -410,8 +353,7 @@ pub trait Source<const BITS: usize>: 'static {
 
 /// Forwards to the boxed source, so a `Box<dyn Source>` is itself a `Source`.
 ///
-/// This lets [`Simulator::run_many_sources`] hold a heterogeneous
-/// `Vec` of differently-typed traces behind trait objects.
+/// This lets callers hold differently-typed traces behind trait objects.
 impl<const BITS: usize, S: Source<BITS> + ?Sized> Source<BITS> for Box<S> {
     fn fetch(&mut self) -> Option<Info<BITS>> {
         (**self).fetch()
@@ -860,106 +802,35 @@ mod tests {
         assert_eq!(metrics.total_space, 8.0); // the predictor's reported state area
     }
 
-    #[test]
-    fn run_many_predictors_gives_each_predictor_the_full_trace() {
-        let source = VecDeque::from([
-            branch(Kind::ConditionalDirect, Direction::Taken),
-            branch(Kind::ConditionalDirect, Direction::Untaken),
-            branch(Kind::Return, Direction::Taken),
-        ]);
-        #[cfg(not(feature = "parallel"))]
-        let predictors = vec![
-            Box::new(AlwaysTaken) as Box<dyn Predictor<64>>,
-            Box::new(AlwaysTaken),
-        ];
-        #[cfg(feature = "parallel")]
-        let predictors = vec![
-            Box::new(AlwaysTaken) as Box<dyn Predictor<64> + Send>,
-            Box::new(AlwaysTaken),
-        ];
-        let costs = Costs::default();
-        let config = Config::none();
-
-        // Each predictor sees its own clone of the source, scoring every branch.
-        let metrics = Simulator::run_many_predictors(source, predictors, costs, config);
-        assert_eq!(metrics.len(), 2);
-        assert!(
-            metrics
-                .iter()
-                .all(|m| m.total_predictions == 3 && m.total_hits == 2)
-        );
+    fn always_taken() -> Box<dyn Predictor<64> + Send> {
+        Box::new(AlwaysTaken)
     }
 
     #[test]
-    fn run_many_sources_runs_the_predictor_over_each() {
-        let source = || {
+    fn run_many_runs_every_source_config_and_predictor_combination_in_order() {
+        let sources = vec![
+            VecDeque::from([branch(Kind::ConditionalDirect, Direction::Taken)]),
             VecDeque::from([
                 branch(Kind::ConditionalDirect, Direction::Taken),
                 branch(Kind::ConditionalDirect, Direction::Untaken),
-            ])
-        };
-        #[cfg(not(feature = "parallel"))]
-        let sources = vec![
-            Box::new(source()) as Box<dyn Source<64>>,
-            Box::new(source()),
-            Box::new(source()),
+            ]),
         ];
-        #[cfg(feature = "parallel")]
-        let sources = vec![
-            Box::new(source()) as Box<dyn Source<64> + Send>,
-            Box::new(source()),
-            Box::new(source()),
+        let predictor_builders: Vec<fn() -> Box<dyn Predictor<64> + Send>> =
+            vec![always_taken, always_taken];
+        let configs = vec![
+            Config::none(),
+            Config {
+                warmup: 1,
+                speculations: 0,
+            },
         ];
-        let predictor = AlwaysTaken;
-        let costs = Costs::default();
-        let config = Config::none();
 
-        // Each source trains its own clone of the predictor, scoring all conditionals.
-        let metrics = Simulator::run_many_sources(sources, predictor, costs, config);
-        assert_eq!(metrics.len(), 3);
-        assert!(
-            metrics
-                .iter()
-                .all(|m| m.total_predictions == 2 && m.total_hits == 1)
-        );
-    }
-
-    #[cfg(feature = "parallel")]
-    #[test]
-    #[should_panic(expected = "predictor thread panicked")]
-    fn run_many_predictors_propagates_a_panicking_predictor() {
-        struct Panics;
-        impl Predictor<64> for Panics {
-            fn predict(&mut self, _current: Address<64>) -> Outcome<64> {
-                panic!("boom");
-            }
-
-            fn size(&self) -> f64 {
-                0.0
-            }
-        }
-
-        let source = VecDeque::from([branch(Kind::ConditionalDirect, Direction::Taken)]);
-        let predictors: Vec<Box<dyn Predictor<64> + Send>> = vec![Box::new(Panics)];
-
-        let _ =
-            Simulator::run_many_predictors(source, predictors, Costs::default(), Config::none());
-    }
-
-    #[cfg(feature = "parallel")]
-    #[test]
-    #[should_panic(expected = "source thread panicked")]
-    fn run_many_sources_propagates_a_panicking_source() {
-        struct Panics;
-        impl Source<64> for Panics {
-            fn fetch(&mut self) -> Option<Info<64>> {
-                panic!("boom");
-            }
-        }
-
-        let sources: Vec<Box<dyn Source<64> + Send>> = vec![Box::new(Panics)];
-
-        let _ = Simulator::run_many_sources(sources, AlwaysTaken, Costs::default(), Config::none());
+        let metrics = Simulator::run_many(sources, predictor_builders, configs, Costs::default());
+        let predictions = metrics
+            .iter()
+            .map(|metrics| metrics.total_predictions)
+            .collect::<Vec<_>>();
+        assert_eq!(predictions, [1, 1, 0, 0, 2, 2, 1, 1]);
     }
 
     /// Predicts whatever `update` last trained it with; starts `Untaken`. Its

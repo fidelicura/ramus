@@ -67,33 +67,39 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    // Sweep every warmup and selected predictor over every requested trace.
+    let sources = paths
+        .iter()
+        .map(|path| Trace::open(path).map_err(|error| format!("{path}: {error}")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let configs = arguments
+        .warmups
+        .iter()
+        .flat_map(|&warmup| {
+            arguments
+                .speculations
+                .iter()
+                .map(move |&speculations| Config {
+                    warmup,
+                    speculations,
+                })
+        })
+        .collect::<Vec<_>>();
+    let predictors = selected.iter().map(|(_, build)| *build).collect();
+    let metrics = Simulator::run_many(sources, predictors, configs.clone(), costs);
+
+    // Results are ordered by trace, config, then predictor.
+    let mut metrics = metrics.into_iter();
     let mut reports = Vec::new();
     for path in &paths {
-        // Read and parse the trace from user path.
-        let trace = Trace::open(path).map_err(|error| format!("{path}: {error}"))?;
-
-        for &warmup in &arguments.warmups {
-            let config = Config {
-                warmup,
-                speculations: arguments.speculations,
-            };
-
-            // Heapify with `Box` one fresh predictor per user selection and warmup.
-            let predictors = selected.iter().map(|(_, build)| build()).collect();
-            let metrics =
-                Simulator::run_many_predictors(trace.clone(), predictors, costs, config);
-
-            // Build one report per predictor, in order of user selection.
-            for (index, (name, _)) in selected.iter().enumerate() {
-                let report = Report::new(
+        for &config in &configs {
+            for (name, _) in &selected {
+                reports.push(Report::new(
                     path,
                     name,
-                    metrics[index],
+                    metrics.next().expect("one metric per run"),
                     config,
                     arguments.name.as_deref(),
-                );
-                reports.push(report);
+                ));
             }
         }
     }

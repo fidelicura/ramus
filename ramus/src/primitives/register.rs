@@ -33,6 +33,8 @@ impl<const BITS: usize> Register<BITS> {
 
     /// Creates a register set to [`Value::ZERO`].
     pub fn new() -> Self {
+        crate::validate_bits!(self);
+
         Self(Value::ZERO)
     }
 }

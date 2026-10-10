@@ -258,11 +258,9 @@ fn main() {
     // many predictions sit unresolved before training lags behind them.
     let config = Config::none();
 
-    // HINT: To compare many predictors or many traces in one go,
-    // reach for `Simulator::{run_many_predictors,run_many_sources}`.
+    // HINT: `Simulator::run_many` runs every source, config, and predictor
+    // combination; with the `parallel` feature, it uses a bounded thread pool.
     //
-    // HINT: You can spread the `Simulator::run_many_*`
-    // sweeps across threads using `parallel` feature flag.
     let metrics = Simulator::run_one(source, predictor, costs, config);
     println!("predictions:  {:.3}", metrics.total_predictions); // Total amount of predictions performed over trace.
     println!("hits:         {:.3}", metrics.total_hits);        // Total amount of correct predictions performed over trace.

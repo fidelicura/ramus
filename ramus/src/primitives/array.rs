@@ -42,6 +42,8 @@ impl<const BITS: usize, const LENGTH: usize> Array<BITS, LENGTH> {
 
 impl<const BITS: usize, const LENGTH: usize> Default for Array<BITS, LENGTH> {
     fn default() -> Self {
+        crate::validate_bits!(self);
+
         Self::new()
     }
 }

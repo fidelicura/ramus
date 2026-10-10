@@ -323,8 +323,9 @@ macro_rules! select {
 }
 
 impl<const BITS: usize> Default for Value<BITS> {
-    #[inline(always)]
     fn default() -> Self {
+        crate::validate_bits!(self);
+
         Self::ZERO
     }
 }

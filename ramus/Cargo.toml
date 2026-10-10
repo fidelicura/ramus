@@ -15,10 +15,11 @@
 # SOURCE: <https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html>
 [dependencies]
 serde = { version = "1.0", features = ["derive"], optional = true }
+rayon = { version = "1", optional = true }
 
 # SOURCE: <https://doc.rust-lang.org/cargo/reference/features.html>
 [features]
-parallel = []
+parallel = ["dep:rayon"]
 serde = ["dep:serde"]
 
 # SOURCE: <https://doc.rust-lang.org/cargo/reference/manifest.html#the-package-section>

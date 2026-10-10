@@ -325,6 +325,10 @@ pub type Target<const BITS: usize> = Address<BITS>;
 /// the build if `BITS` exceeds the 128-bit backing store.
 #[macro_export]
 macro_rules! validate_bits {
+    (self) => {
+        const { Self::VALID };
+    };
+
     ($bits:ident) => {
         #[allow(dead_code)] // XXX: It is not "dead" - it still asserts in const contexts.
         const VALID: () = assert!(
