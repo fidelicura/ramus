@@ -34,7 +34,17 @@ impl<const CAPACITY: usize, const COUNT: usize> Default for RAS<CAPACITY, COUNT>
 impl<const CAPACITY: usize, const COUNT: usize> RAS<CAPACITY, COUNT> {
     const ASSERT: () = const {
         assert!(CAPACITY != 0, "CAPACITY must not be zero");
+        assert!(
+            CAPACITY <= u8::MAX as usize,
+            "CAPACITY must not be larger than `u8::MAX`"
+        );
+
         assert!(COUNT != 0, "COUNT must not be zero");
+        assert!(
+            COUNT <= u8::MAX as usize,
+            "COUNT must not be larger than `u8::MAX`"
+        );
+
         assert!(
             COUNT == CAPACITY.ilog2() as usize + 1,
             "COUNT must equal floor(log2(CAPACITY)) + 1"

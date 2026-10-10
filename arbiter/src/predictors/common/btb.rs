@@ -49,6 +49,10 @@ impl<const CAPACITY: usize> BTB<CAPACITY> {
     const ASSERT: () = const {
         assert!(CAPACITY != 0, "CAPACITY must not be zero");
         assert!(
+            CAPACITY <= u64::MAX as usize,
+            "CAPACITY must not be larger than `u64::MAX`"
+        );
+        assert!(
             CAPACITY.is_power_of_two(),
             "CAPACITY must be a power of two"
         );

@@ -13,7 +13,9 @@
 // limitations under the License.
 
 mod btb;
+mod lsc;
 mod ras;
 
 pub use btb::BTB;
+pub use lsc::LSC;
 pub use ras::RAS;
