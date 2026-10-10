@@ -27,7 +27,7 @@ struct Meta {
 impl Meta {
     const LENGTH: usize = 4096;
 
-    fn lookup(&self, address: Address) -> Option<Kind> {
+    fn predict(&self, address: Address) -> Option<Kind> {
         let index = BTB::<{ Self::LENGTH }>::index(address);
         let valid = self.valid[index] == 1u8;
         valid.then(|| Kind::from(self.table[index]))
@@ -57,10 +57,10 @@ pub struct Predictor {
 impl ramus::Predictor<64> for Predictor {
     fn predict(&mut self, address: Address) -> Outcome<64> {
         let (kind, direction, guess_btb, guess_ras) = overlap! {(
-            self.meta.lookup(address),
+            self.meta.predict(address),
             self.lsc.predict(address),
             self.btb.predict(address),
-            self.ras.peek(),
+            self.ras.predict(),
         )};
 
         let target = select!(kind => {

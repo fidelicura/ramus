@@ -38,5 +38,5 @@ macro_rules! predictors {
 // XXX: Predictor name should not contain symbols that CLI
 // interprets as delimiter between two different arguments.
 predictors! {
-    "sct_btb_ras" => sct_btb_ras::Predictor,
+    "lsc_btb_ras" => lsc_btb_ras::Predictor,
 }

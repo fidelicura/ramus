@@ -253,8 +253,8 @@ fn main() {
     let source = Trace::example();
     let predictor = Bimodal::default();
     // `Config::none` scores from the first branch and resolves every prediction
-    // immediately; set `warmup`/`charge` to train over (and optionally meter) a
-    // leading window before scoring begins, or `speculations` to let up to that
+    // immediately; set `warmup` to train over an unmetered leading window before
+    // scoring begins, or `speculations` to let up to that
     // many predictions sit unresolved before training lags behind them.
     let config = Config::none();
 

@@ -13,7 +13,6 @@
 // limitations under the License.
 
 mod cli;
-mod config;
 mod costs;
 mod predictors;
 mod report;
@@ -21,7 +20,7 @@ mod trace;
 
 use clap::Parser;
 use cli::{Arguments, Format};
-use ramus::Simulator;
+use ramus::{Config, Simulator};
 use report::Report;
 use std::error::Error;
 use std::fs;
@@ -52,9 +51,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Setup hardware costs that simulator will use.
     let costs = costs::load(&arguments.costs)?;
 
-    // Setup simulation config that simulator will use.
-    let config = config::load(&arguments.config)?;
-
     // Expand any directories with traces into their contained files.
     let mut paths = Vec::new();
     for path in arguments.traces {
@@ -71,31 +67,34 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    // Sweep every selected predictor over every requested trace.
+    // Sweep every warmup and selected predictor over every requested trace.
     let mut reports = Vec::new();
     for path in &paths {
         // Read and parse the trace from user path.
         let trace = Trace::open(path).map_err(|error| format!("{path}: {error}"))?;
 
-        // Heapify with `Box` one fresh predictor per user selection.
-        let mut predictors = Vec::new();
-        for (_, build) in &selected {
-            let predictor = build();
-            predictors.push(predictor);
-        }
+        for &warmup in &arguments.warmups {
+            let config = Config {
+                warmup,
+                speculations: arguments.speculations,
+            };
 
-        let metrics = Simulator::run_many_predictors(trace, predictors, costs, config);
+            // Heapify with `Box` one fresh predictor per user selection and warmup.
+            let predictors = selected.iter().map(|(_, build)| build()).collect();
+            let metrics =
+                Simulator::run_many_predictors(trace.clone(), predictors, costs, config);
 
-        // Build one report per predictor, in order of user selection.
-        for (index, (name, _)) in selected.iter().enumerate() {
-            let report = Report::new(
-                path,
-                name,
-                metrics[index],
-                config,
-                arguments.name.as_deref(),
-            );
-            reports.push(report);
+            // Build one report per predictor, in order of user selection.
+            for (index, (name, _)) in selected.iter().enumerate() {
+                let report = Report::new(
+                    path,
+                    name,
+                    metrics[index],
+                    config,
+                    arguments.name.as_deref(),
+                );
+                reports.push(report);
+            }
         }
     }
 

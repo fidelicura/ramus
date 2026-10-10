@@ -51,7 +51,7 @@ impl<const CAPACITY: usize, const COUNT: usize> RAS<CAPACITY, COUNT> {
         );
     };
 
-    pub fn push(&mut self, target: Target) {
+    fn push(&mut self, target: Target) {
         const { Self::ASSERT };
 
         select!(self.count < CAPACITY as u8 => {
@@ -63,7 +63,7 @@ impl<const CAPACITY: usize, const COUNT: usize> RAS<CAPACITY, COUNT> {
         });
     }
 
-    pub fn pop(&mut self) {
+    fn pop(&mut self) {
         select!(self.count > 0u8 => {
             true => {
                 self.count = self.count.saturating_sub(1u8);
@@ -73,7 +73,7 @@ impl<const CAPACITY: usize, const COUNT: usize> RAS<CAPACITY, COUNT> {
         });
     }
 
-    pub fn peek(&self) -> Option<Target> {
+    pub fn predict(&self) -> Option<Target> {
         select!(self.count > 0u8 => {
             true => Some(self.stack[self.count.saturating_sub(1u8)]),
             false => None,

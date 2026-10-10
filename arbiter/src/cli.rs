@@ -15,7 +15,8 @@
 use clap::{Parser, ValueEnum};
 
 /// Trace-driven branch-predictor evaluation: run every `--predictors` selection
-/// over every `--traces` file, printing one report per (trace, predictor) pair.
+/// over every `--traces` file for each `--warmups` value, printing one report
+/// per (trace, warmup, predictor) combination.
 #[derive(Parser)]
 pub struct Arguments {
     /// Trace files to sweep - CBP-NG 2026 Gzipped.
@@ -32,16 +33,20 @@ pub struct Arguments {
     #[arg(long)]
     pub costs: Option<String>,
 
-    /// Simulation config JSON path, overriding the built-in default.
-    #[arg(long)]
-    pub config: Option<String>,
+    /// Comma-separated warmup counts; each count runs a separate simulation.
+    #[arg(long, value_delimiter = ',', default_value = "0")]
+    pub warmups: Vec<u64>,
+
+    /// Maximum number of predictions allowed to remain unresolved at once.
+    #[arg(long, default_value_t = 0)]
+    pub speculations: u64,
 
     /// Run identifier to use in every report, overriding the generated petname.
     #[arg(long)]
     pub name: Option<String>,
 
-    /// Output format.
-    #[arg(long, value_enum, default_value = "json")]
+    /// Output format to use in every report.
+    #[arg(long, value_enum, default_value = "ascii")]
     pub format: Format,
 }
 
@@ -49,4 +54,26 @@ pub struct Arguments {
 pub enum Format {
     Json,
     Ascii,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Arguments;
+    use clap::Parser;
+
+    #[test]
+    fn parses_comma_separated_warmups() {
+        let arguments = Arguments::try_parse_from([
+            "arbiter",
+            "--traces",
+            "trace.gz",
+            "--predictors",
+            "bimodal",
+            "--warmups",
+            "0,16,128",
+        ])
+        .unwrap();
+
+        assert_eq!(arguments.warmups, vec![0, 16, 128]);
+    }
 }

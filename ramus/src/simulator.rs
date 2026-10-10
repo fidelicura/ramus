@@ -83,11 +83,9 @@ impl<const BITS: usize, P: Predictor<BITS> + ?Sized> Predictor<BITS> for Box<P> 
 /// Run-timing knobs: warmup window plus speculative in-flight depth.
 ///
 /// The first `warmup` fetched records train the predictor but are not scored,
-/// so cold-start misses don't pollute the hit rate. `charge` decides whether
-/// metered energy and area accrue during that window: `false` measures steady
-/// state only (warm the tables, then meter); `true` counts the warmup work too.
-/// The predictor's static storage area ([`Predictor::size`]) is always counted
-/// regardless.
+/// so cold-start misses don't pollute the hit rate. Operations during warmup
+/// are not metered; the predictor's static storage area ([`Predictor::size`])
+/// is counted regardless.
 ///
 /// `speculations` is the max number of predictions allowed to
 /// sit predicted-but-unresolved (queued, awaiting [`Predictor::update`]) at
@@ -104,8 +102,6 @@ impl<const BITS: usize, P: Predictor<BITS> + ?Sized> Predictor<BITS> for Box<P> 
 pub struct Config {
     /// Number of leading branch records to train on without scoring.
     pub warmup: u64,
-    /// Whether metered operations charge energy and area during the warmup window.
-    pub charge: bool,
     /// Max number of predictions allowed predicted-but-unresolved at once.
     pub speculations: u64,
 }
@@ -116,7 +112,6 @@ impl Config {
     pub const fn none() -> Self {
         Self {
             warmup: 0,
-            charge: true,
             speculations: 0,
         }
     }
@@ -265,10 +260,8 @@ impl Simulator {
         // can lag behind `predict` under pipeline overlap.
         let mut queue = Queue::new(config.speculations as usize);
 
-        // 3. Warmup window: feed the leading `config.warmup` records with
-        // `score: false`, so cold-start misses never reach `Metrics`; charging
-        // is suppressed unless the caller opted in via `config.charge`.
-        Metrics::turn(config.charge);
+        // 3. Warmup window: train on leading records without scoring or metering.
+        Metrics::turn(false);
         for _ in 0..config.warmup {
             let Some(info) = source.fetch() else {
                 break;
@@ -482,7 +475,7 @@ mod tests {
     }
 
     /// Charges one `wrapping_add` per prediction, so a run's energy equals the
-    /// number of metered predictions; used to observe warmup charge gating.
+    /// number of metered predictions; used to observe warmup metering.
     #[derive(Clone)]
     struct OneAdd;
 
@@ -589,7 +582,6 @@ mod tests {
                 costs,
                 Config {
                     warmup,
-                    charge: false,
                     speculations,
                 },
             );
@@ -788,7 +780,6 @@ mod tests {
         let costs = Costs::default();
         let config = Config {
             warmup: 2,
-            charge: true,
             speculations: 0,
         };
 
@@ -809,7 +800,6 @@ mod tests {
         let costs = Costs::default();
         let config = Config {
             warmup: 5,
-            charge: true,
             speculations: 0,
         };
 
@@ -818,7 +808,7 @@ mod tests {
     }
 
     #[test]
-    fn warmup_charge_flag_gates_metered_energy() {
+    fn warmup_operations_are_unmetered() {
         let costs = Costs {
             wrapping_add: Cost {
                 switching_energy: Some(1.0),
@@ -834,31 +824,17 @@ mod tests {
             ])
         };
 
-        // charge: false -> only the one scored prediction's add is metered.
-        let off = Simulator::run_one(
+        // Only the one scored prediction's add is metered.
+        let metrics = Simulator::run_one(
             trace(),
             OneAdd,
             costs,
             Config {
                 warmup: 2,
-                charge: false,
                 speculations: 0,
             },
         );
-        assert_eq!(off.total_energy, 1.0);
-
-        // charge: true -> all three adds metered, even the warmed ones.
-        let on = Simulator::run_one(
-            trace(),
-            OneAdd,
-            costs,
-            Config {
-                warmup: 2,
-                charge: true,
-                speculations: 0,
-            },
-        );
-        assert_eq!(on.total_energy, 3.0);
+        assert_eq!(metrics.total_energy, 1.0);
     }
 
     #[test]
@@ -1048,7 +1024,6 @@ mod tests {
         let costs = Costs::default();
         let config = Config {
             warmup: 0,
-            charge: true,
             speculations: 2,
         };
 
@@ -1107,7 +1082,6 @@ mod tests {
         // predictions must be drained (and thus trained) at trace end.
         let config = Config {
             warmup: 0,
-            charge: true,
             speculations: 5,
         };
 
@@ -1161,7 +1135,6 @@ mod tests {
         // mid-window, so only the boundary/end drains resolve anything.
         let config = Config {
             warmup: 2,
-            charge: true,
             speculations: 3,
         };
 

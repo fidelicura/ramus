@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use comfy_table::Table;
 use ramus::{Config, Metrics};
 use serde::Serialize;
 
@@ -114,15 +115,25 @@ pub fn format_ascii(reports: &[Report<'_>]) -> String {
         return "No reports.".to_owned();
     }
 
-    reports
-        .iter()
-        .map(format_report_ascii)
-        .collect::<Vec<_>>()
-        .join("\n\n")
+    let rows = reports.iter().map(ascii_rows).collect::<Vec<_>>();
+    let mut table = Table::new();
+    table.set_header(
+        std::iter::once("Metric".to_owned())
+            .chain((1..=reports.len()).map(|run| format!("Run {run}")))
+            .collect::<Vec<_>>(),
+    );
+    for (row, (label, _)) in rows[0].iter().enumerate() {
+        table.add_row(
+            std::iter::once((*label).to_owned())
+                .chain(rows.iter().map(|run| run[row].1.clone()))
+                .collect::<Vec<_>>(),
+        );
+    }
+    table.to_string()
 }
 
-fn format_report_ascii(report: &Report<'_>) -> String {
-    let metadata = [
+fn ascii_rows(report: &Report<'_>) -> Vec<(&'static str, String)> {
+    vec![
         ("Run identifier", report.run_identifier.clone()),
         ("Trace path", report.trace_path.to_owned()),
         ("Predictor name", report.predictor_name.to_owned()),
@@ -131,15 +142,11 @@ fn format_report_ascii(report: &Report<'_>) -> String {
             "Configured speculations",
             report.configured_speculations.to_string(),
         ),
-    ];
-    let overall = [
         ("Total predictions", report.total_predictions.to_string()),
         ("Total hits", report.total_hits.to_string()),
         ("Total misses", report.total_misses.to_string()),
         ("Hit rate", format!("{:.2}%", report.hit_rate * 100.0)),
         ("Miss rate", format!("{:.2}%", report.miss_rate * 100.0)),
-    ];
-    let direction = [
         (
             "Direction predictions",
             report.total_direction_predictions.to_string(),
@@ -153,8 +160,6 @@ fn format_report_ascii(report: &Report<'_>) -> String {
             "Direction accuracy",
             format!("{:.2}%", report.direction_accuracy * 100.0),
         ),
-    ];
-    let target = [
         (
             "Target predictions",
             report.total_target_predictions.to_string(),
@@ -165,8 +170,6 @@ fn format_report_ascii(report: &Report<'_>) -> String {
             "Target accuracy",
             format!("{:.2}%", report.target_accuracy * 100.0),
         ),
-    ];
-    let resources = [
         ("Total operations", report.total_operations.to_string()),
         ("Total energy", format!("{:.6}", report.total_energy)),
         ("Total leakage", format!("{:.6}", report.total_leakage)),
@@ -183,27 +186,5 @@ fn format_report_ascii(report: &Report<'_>) -> String {
         ("Energy/hit", format!("{:.6}", report.energy_per_hit)),
         ("Energy/miss", format!("{:.6}", report.energy_per_miss)),
         ("Energy/area", format!("{:.6}", report.energy_per_area)),
-    ];
-
-    let format = |rows: &[(&str, String)]| {
-        let label_width = rows.iter().map(|(label, _)| label.len()).max().unwrap_or(0);
-        let lines = rows
-            .iter()
-            .map(|(label, value)| format!("{label:<label_width$} : {value}"))
-            .collect::<Vec<_>>();
-        let width = lines.iter().map(String::len).max().unwrap_or(0);
-        let border = format!("+{}+", "-".repeat(width + 2));
-        let mut output = vec![border.clone()];
-        output.extend(lines.iter().map(|line| format!("| {line:<width$} |")));
-        output.push(border);
-        output.join("\n")
-    };
-    [
-        format(&metadata),
-        format(&overall),
-        format(&direction),
-        format(&target),
-        format(&resources),
     ]
-    .join("\n\n")
 }

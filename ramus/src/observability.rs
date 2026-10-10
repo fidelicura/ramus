@@ -54,8 +54,8 @@ struct Ledger {
     overlaps: Vec<u64>,
     /// Whether metered operations currently accrue.
     ///
-    /// The simulator clears this during a warmup window with charging
-    /// off, so warmup work runs but is not metered.
+    /// The simulator clears this during warmup, so warmup work runs but is not
+    /// metered.
     charging: bool,
 }
 
@@ -136,7 +136,7 @@ impl Metrics {
 
     /// Enable or disable metering for subsequent operations this run.
     ///
-    /// Used by the simulator to suppress charging during an unmetered warmup window.
+    /// Used by the simulator to suppress metering during warmup.
     pub(crate) fn turn(on: bool) {
         LEDGER.with(|cell| cell.borrow_mut().charging = on);
     }
