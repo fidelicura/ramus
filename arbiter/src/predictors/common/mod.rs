@@ -14,6 +14,7 @@
 
 mod btb;
 mod lsc;
+mod ppm;
 mod ras;
 
 pub use btb::BTB;
